@@ -302,6 +302,11 @@ export function PhaseWorkspace() {
           {activeIndex > 0 && !completedStages.includes(activeIndex - 1) && (
             <div className="muted" style={{ fontSize: "0.78rem", marginTop: 6 }}>Complete the previous stage first.</div>
           )}
+          {runMut.isError && (
+            <div className="login-error" style={{ marginTop: 10 }}>
+              Request failed: {runMut.error instanceof Error ? runMut.error.message : "Unknown error"} — click Execute to retry.
+            </div>
+          )}
 
           {/* Results */}
           {outcome && (

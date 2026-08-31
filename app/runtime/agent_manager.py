@@ -339,8 +339,6 @@ class AgentManager:
                     "error": error_msg
                 }
                 trace_store.record_trace(trace)
-                if st is not None:
-                    st.session_state.setdefault("observability_traces", []).append(trace)
                 audit_logger.log_action(
                     action=f"Agent Stage Execution: {stage.replace('_', ' ').title()} (Failed)",
                     username="vaibhav",
@@ -372,14 +370,10 @@ class AgentManager:
                 asset_df = None
                 if datasets and "ai_agent_inventory" in datasets:
                     asset_df = datasets["ai_agent_inventory"]
-                elif st is not None and isinstance(st.session_state.get("datasets"), dict) and "ai_agent_inventory" in st.session_state.datasets:
-                    asset_df = st.session_state.datasets["ai_agent_inventory"]
-                    
+
                 report = detector.run_all(combined_text, asset_df)
 
                 trace_store.record_hallucination_report(f"{use_case}_{stage}", report)
-                if st is not None:
-                    st.session_state.setdefault("hallucination_reports", {})[f"{use_case}_{stage}"] = report
 
                 # Log each flag as a guardrail event in InAppMetrics
                 metrics = InAppMetrics()
@@ -403,8 +397,6 @@ class AgentManager:
                 "error": None
             }
             trace_store.record_trace(success_trace)
-            if st is not None:
-                st.session_state.setdefault("observability_traces", []).append(success_trace)
 
             audit_logger.log_action(
                 action=f"Agent Stage Completed",
@@ -442,21 +434,6 @@ class AgentManager:
                             stage=stage,
                             session_id=session_id
                         )
-                    
-                    # Store kpi_snapshot — best-effort, only when a KPIEngine is
-                    # available via the Streamlit session (the API computes KPIs
-                    # via its own endpoint and does not need this snapshot).
-                    if st is not None and st.session_state.get("kpi_engine") is not None:
-                        kpis = st.session_state.kpi_engine.compute_all()
-                        mem.store(
-                            user=username,
-                            entry_type="kpi_snapshot",
-                            key=f"{use_case}_{stage}_kpis",
-                            value=kpis,
-                            use_case=use_case,
-                            stage=stage,
-                            session_id=session_id
-                        )
                 except Exception as mem_err:
                     logger.error(f"Failed to save stage to memory: {mem_err}")
 
@@ -476,8 +453,6 @@ class AgentManager:
                 "error": str(exc)
             }
             trace_store.record_trace(failure_trace)
-            if st is not None:
-                st.session_state.setdefault("observability_traces", []).append(failure_trace)
 
             audit_logger.log_action(
                 action=f"Agent Stage Execution: {stage.replace('_', ' ').title()} (Failed)",
