@@ -1,0 +1,49 @@
+# Core
+python-dotenv>=1.0
+pydantic>=2.7
+PyYAML>=6.0
+
+# React frontend API backend
+fastapi>=0.111
+uvicorn[standard]>=0.30
+python-multipart>=0.0.9
+
+# LLM & Agents
+langchain>=0.2
+langchain-openai>=0.1
+langchain-community>=0.2
+langgraph>=0.2
+openai>=1.35
+tiktoken>=0.7
+
+# Vector DB
+faiss-cpu>=1.8
+
+# Observability
+langsmith>=0.1
+prometheus-client>=0.20
+structlog>=24.1
+
+# Data
+pandas>=2.2
+numpy>=1.26
+
+# File parsing
+PyMuPDF>=1.24
+chardet>=5.2
+python-docx>=1.1
+
+# MCP
+mcp>=1.0
+
+# Async
+aiohttp>=3.9
+
+# Utilities
+httpx>=0.27
+tenacity>=8.3
+cachetools>=5.3
+
+# Testing
+pytest>=8.0
+pytest-asyncio>=0.23

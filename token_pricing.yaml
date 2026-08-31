@@ -1,0 +1,41 @@
+# Token pricing per model — editable without code change
+# All prices in USD per 1,000,000 tokens
+
+models:
+  gpt-4o-mini:
+    input_cost_per_1m: 0.15
+    output_cost_per_1m: 0.60
+    display_name: "GPT-4o-mini"
+    provider: "openai"
+
+  gpt-4o:
+    input_cost_per_1m: 2.50
+    output_cost_per_1m: 10.00
+    display_name: "GPT-4o"
+    provider: "openai"
+
+  text-embedding-3-small:
+    input_cost_per_1m: 0.02
+    output_cost_per_1m: 0.0
+    display_name: "text-embedding-3-small"
+    provider: "openai"
+
+  text-embedding-3-large:
+    input_cost_per_1m: 0.13
+    output_cost_per_1m: 0.0
+    display_name: "text-embedding-3-large"
+    provider: "openai"
+
+  ollama-llama3.1-8b:
+    input_cost_per_1m: 0.0
+    output_cost_per_1m: 0.0
+    display_name: "Ollama llama3.1:8b"
+    provider: "ollama"
+    compute_cost_per_hour: 0.50
+
+  ollama-deepseek-r1-7b:
+    input_cost_per_1m: 0.0
+    output_cost_per_1m: 0.0
+    display_name: "Ollama deepseek-r1:7b"
+    provider: "ollama"
+    compute_cost_per_hour: 0.50

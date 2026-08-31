@@ -1,0 +1,200 @@
+# ============================================================================
+# Securing AI Demo — Compliance & Framework Mappings
+# Version: 2.0
+#
+# Authoritative reference for mapping findings, techniques, and rules to
+# industry frameworks across all five NIST CSF phases (Identify, Protect,
+# Detect, Respond, Recover) applied to AI/agent security.
+#
+# NOTE: Technique IDs use two notations:
+#   - MITRE ATT&CK v14 notation (e.g. T1190, T1078.002) for infrastructure-level
+#     techniques still relevant to AI systems (model-serving endpoints, hosts).
+#   - MITRE ATLAS notation (e.g. AML.T0051) for adversarial-ML-specific
+#     techniques targeting AI agents and models directly.
+# ============================================================================
+
+# --------------------------------------------------------------------------
+# Identify — AI/Agent Asset & Risk Discovery
+# --------------------------------------------------------------------------
+identify:
+  accent_colour: "#00d4ff"
+
+  mitre_attack:
+    techniques:
+      - id: AML.T0034
+        name: Discover LLM System Information
+        tactic: Discovery
+      - id: AML.T0007
+        name: Discover AI Model Ontology
+        tactic: Discovery
+      - id: AML.T0020
+        name: Poison Training Data (lineage surface)
+        tactic: Resource Development
+      - id: T1592
+        name: Gather Victim Host Information
+        tactic: Reconnaissance
+      - id: T1590
+        name: Gather Victim Network Information
+        tactic: Reconnaissance
+
+  nist_ai_rmf_1_0:
+    functions:
+      - id: MAP
+        name: Map
+        description: Establish context and catalogue AI system inventory, lineage, and risk.
+      - id: MEASURE
+        name: Measure
+        description: Quantify agent risk via composite scoring across permission, exposure, and sensitivity.
+
+  owasp_llm_top10:
+    - id: LLM08
+      name: Excessive Agency
+      relevance: Unowned, internet-facing agents with unreviewed permission scope.
+    - id: LLM06
+      name: Sensitive Information Disclosure
+      relevance: Model lineage tracing surfaces Regulated-PII training data exposure.
+
+# --------------------------------------------------------------------------
+# Protect — Guardrails, Least Privilege & Secrets
+# --------------------------------------------------------------------------
+protect:
+  accent_colour: "#00ff88"
+
+  mitre_attack:
+    techniques:
+      - id: AML.T0051
+        name: LLM Prompt Injection
+        tactic: Initial Access
+      - id: AML.T0054
+        name: LLM Jailbreak
+        tactic: Defense Evasion
+      - id: AML.T0053
+        name: LLM Plugin Compromise
+        tactic: Execution
+      - id: T1552
+        name: Unsecured Credentials
+        tactic: Credential Access
+      - id: T1078
+        name: Valid Accounts
+        tactic: [Initial Access, Persistence, Privilege Escalation]
+
+  nist_ai_rmf_1_0:
+    functions:
+      - id: GOVERN
+        name: Govern
+        description: Codify guardrail, access, and secrets policy as versioned, enforceable controls.
+      - id: MANAGE
+        name: Manage
+        description: Enforce least-privilege tool access and real-time guardrail policy.
+
+  owasp_llm_top10:
+    - id: LLM01
+      name: Prompt Injection
+      relevance: Core guardrail-proxy enforcement target.
+    - id: LLM02
+      name: Insecure Output Handling
+      relevance: Secrets isolation — credentials reachable via LLM context/output.
+
+# --------------------------------------------------------------------------
+# Detect — Live Detection & Automated Red-Teaming
+# --------------------------------------------------------------------------
+detect:
+  accent_colour: "#ff4444"
+
+  mitre_attack:
+    techniques:
+      - id: AML.T0051
+        name: LLM Prompt Injection
+        tactic: Initial Access
+      - id: AML.T0054
+        name: LLM Jailbreak
+        tactic: Defense Evasion
+      - id: AML.T0048
+        name: External Harms
+        tactic: Impact
+      - id: AML.T0043
+        name: Craft Adversarial Data
+        tactic: Resource Development
+      - id: AML.T0024
+        name: Exfiltration via LLM Output
+        tactic: Exfiltration
+      - id: AML.T0034
+        name: Discover LLM System Information
+        tactic: Discovery
+
+  nist_ai_rmf_1_0:
+    functions:
+      - id: MEASURE
+        name: Measure
+        description: Continuously test detection efficacy against live adversarial corpus and automated red-team campaigns.
+
+  owasp_llm_top10:
+    - id: LLM01
+      name: Prompt Injection
+      relevance: Live jailbreak/injection detection testing.
+    - id: LLM04
+      name: Model Denial of Service
+      relevance: Anomalous agent behaviour monitoring for resource-exhaustion patterns.
+
+# --------------------------------------------------------------------------
+# Respond — Containment & Incident Playbooks
+# --------------------------------------------------------------------------
+respond:
+  accent_colour: "#a855f7"
+
+  mitre_attack:
+    techniques:
+      - id: AML.T0048
+        name: External Harms
+        tactic: Impact
+      - id: T1531
+        name: Account Access Removal
+        tactic: Impact
+      - id: T1489
+        name: Service Stop
+        tactic: Impact
+
+  nist_csf_2_0:
+    categories:
+      - id: RS.MI
+        name: Mitigation
+        description: Automated containment of a flagged agent — isolate, revoke, disable, rate-limit.
+      - id: RS.AN
+        name: Analysis
+        description: SOAR playbook execution and incident record analysis.
+
+  nist_ai_rmf_1_0:
+    functions:
+      - id: MANAGE
+        name: Manage
+        description: Respond to identified AI risk incidents with documented, auditable containment actions.
+
+# --------------------------------------------------------------------------
+# Recover — Rollback & Guardrail Update Loop
+# --------------------------------------------------------------------------
+recover:
+  accent_colour: "#14b8a6"
+
+  mitre_attack:
+    techniques:
+      - id: AML.T0020
+        name: Poison Training Data (post-incident review)
+        tactic: Resource Development
+      - id: T1490
+        name: Inhibit System Recovery (defensive posture reference)
+        tactic: Impact
+
+  nist_csf_2_0:
+    categories:
+      - id: RC.RP
+        name: Recovery Planning
+        description: Config/prompt rollback to last known-good version snapshot.
+      - id: RC.IM
+        name: Improvements
+        description: Guardrail policy updates sourced from red-team and incident findings, closing the loop into Protect.
+
+  nist_ai_rmf_1_0:
+    functions:
+      - id: MANAGE
+        name: Manage
+        description: Restore AI systems to a known-good state and measurably improve guardrail effectiveness.

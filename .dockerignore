@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[oc]
+.venv/
+*.egg-info
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# Env / secrets
+.env
+
+# Runtime data
+data/*.db
+data/*.sqlite3
+data/rag_cache/
+
+# VCS / editor / misc
+.git/
+.gitignore
+.claude/
+.vscode/
+.idea/
+*.log
+scratch_check.py
