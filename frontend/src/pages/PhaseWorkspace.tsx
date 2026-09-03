@@ -133,12 +133,15 @@ export function PhaseWorkspace() {
   });
 
   const runMut = useMutation({
-    mutationFn: (stageKey: string) => api.runStage(phase, stageKey, dataSource[stageKey] ?? "live"),
-    onSuccess: (res, stageKey) => {
-      setRunResult((prev) => ({ ...prev, [stageKey]: res }));
+    mutationFn: (args: { stageKey: string; silent?: boolean }) => api.runStage(phase, args.stageKey, dataSource[args.stageKey] ?? "live"),
+    onSuccess: (res, args) => {
+      setRunResult((prev) => ({ ...prev, [args.stageKey]: res }));
       qc.invalidateQueries({ queryKey: ["phase-state", phase] });
       qc.invalidateQueries({ queryKey: ["dashboard"] });
-      setResultTab("analysis");
+      // A silent re-run (e.g. the live Guardrail Proxy panel refreshing Output &
+      // Handoff after a real send) shouldn't yank the user back to the AI
+      // Analysis tab if they're looking at Output & Handoff.
+      if (!args.silent) setResultTab("analysis");
     },
   });
 
@@ -383,14 +386,16 @@ export function PhaseWorkspace() {
             <div className="content"><span className="label">📄 Expected Output:</span> {activeStage.agent_info.output}</div>
           </div>
 
-          {phase === "protect" && activeStage.key === "guardrail_proxy" && <LakeraTestPanel />}
+          {phase === "protect" && activeStage.key === "guardrail_proxy" && (
+            <LakeraTestPanel onSent={() => runMut.mutate({ stageKey: activeStage.key, silent: true })} />
+          )}
           {phase === "detect" && (activeStage.key === "injection_detection" || activeStage.key === "red_teaming") && <GarakPyritLivePanel />}
           {phase === "detect" && activeStage.key === "injection_detection" && <LiveVulnerabilityDemo />}
 
           <button
             className="btn btn-execute"
             disabled={runMut.isPending || (activeIndex > 0 && !completedStages.includes(activeIndex - 1))}
-            onClick={() => runMut.mutate(activeStage.key)}
+            onClick={() => runMut.mutate({ stageKey: activeStage.key })}
           >
             {runMut.isPending ? "Running…" : "🚀 Execute AI Analysis"}
           </button>

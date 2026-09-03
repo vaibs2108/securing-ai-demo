@@ -11,7 +11,7 @@ import { GlassCard, Badge } from "./ui";
  * clear one does and its real reply gets screened too — and every real
  * outcome appends a real row to guardrail_events (Protect's own Output tab,
  * previously permanently empty). */
-export function LakeraTestPanel() {
+export function LakeraTestPanel({ onSent }: { onSent?: () => void }) {
   const promptsQ = useQuery({ queryKey: ["security-tools-test-prompts"], queryFn: api.securityToolsTestPrompts });
   const [prompt, setPrompt] = useState("");
   const qc = useQueryClient();
@@ -20,7 +20,13 @@ export function LakeraTestPanel() {
     // Every real call here appends a real guardrail_events row and
     // recomputes KPIs server-side (Guardrail Block Rate especially) — the
     // Dashboard/StoryBar should reflect that immediately, not on next poll.
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["dashboard"] }),
+    // onSent silently re-runs this stage so Output & Handoff (a snapshot
+    // from the last Execute AI Analysis run, not a live query) picks up
+    // the new row too, without requiring a second manual click.
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["dashboard"] });
+      onSent?.();
+    },
   });
 
   const prompts = promptsQ.data?.prompts ?? [];
