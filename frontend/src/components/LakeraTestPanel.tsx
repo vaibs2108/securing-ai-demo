@@ -28,25 +28,13 @@ export function LakeraTestPanel() {
   return (
     <GlassCard style={{ marginBottom: 16 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
-        <span className="section-title" style={{ margin: 0 }}>🛡️ Real Guardrail Proxy — try anything</span>
+        <span className="section-title" style={{ margin: 0 }}>🛡️ Real Guardrail Proxy — try it live</span>
         <Badge variant="green">🟢 Live</Badge>
       </div>
-      <p className="muted" style={{ fontSize: "0.8rem", marginBottom: 10 }}>
-        This is real middleware, not a screening demo — type any prompt. Lakera Guard screens it first; if flagged,
-        the real target agent is never even called. If it's clear, your prompt is really forwarded, the real reply
-        comes back, and that reply is screened too before you see it. Every real outcome logs a real row below in
-        Guardrail Proxy Event Stream — that dataset stops being empty starting now.
+      <p className="muted" style={{ fontSize: "0.8rem", marginBottom: 12 }}>
+        Pick a prompt below and send it. Lakera Guard screens it in real time — a flagged prompt never reaches the
+        target agent; a clear one does, and its reply gets screened too.
       </p>
-      <div style={{ background: "rgba(var(--overlay-rgb), 0.04)", borderRadius: 8, padding: "8px 10px", marginBottom: 14, fontSize: "0.76rem", color: "var(--text-secondary)" }}>
-        💡 <strong>Only traffic sent through here is protected.</strong> Detect's real attacks deliberately go
-        straight to the target agent, bypassing this proxy, to measure raw exposure — see Detect →
-        Live Jailbreak &amp; Injection Detection for that real, separate result.
-        <br />
-        <strong>Lakera's real role:</strong> a pattern classifier, not a secret-matcher — it recognizes jailbreak/
-        injection techniques and sensitive-content categories generally, independent of the target agent's own
-        narrow deterministic filter (which only catches one exact leaked string). Two different, complementary real
-        layers, not the same check twice.
-      </div>
 
       <label className="field-label">Quick real examples (or write your own below)</label>
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>

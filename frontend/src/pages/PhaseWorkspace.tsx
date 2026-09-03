@@ -551,12 +551,7 @@ export function PhaseWorkspace() {
                       </div>
                       {phase === "protect" && activeStage.key === "guardrail_proxy" && result.output_preview.row_count === 0 && (
                         <div style={{ background: "rgba(var(--overlay-rgb), 0.04)", border: "1px solid var(--border-glass)", borderRadius: 8, padding: "8px 10px", marginBottom: 12, fontSize: "0.76rem", color: "var(--text-secondary)" }}>
-                          ℹ️ This will always show 0 rows — real, not a bug. No guardrail middleware currently
-                          intercepts real traffic in front of the target agent, so there's honestly nothing to log
-                          here yet.{result.live_mcp_used.includes("lakera_guard_live_results") && (
-                            <> This run's real Lakera Guard results are on the <strong>🧠 AI Analysis</strong> tab
-                            instead — that's a separate real proof, not this stage's own output dataset.</>
-                          )}
+                          ℹ️ Empty until you try the live proxy above — send a prompt and this fills in.
                         </div>
                       )}
                       <DataTable columns={result.output_preview.columns} records={result.output_preview.records} />
