@@ -5,9 +5,9 @@ import { GlassCard, LoadingBlock } from "../components/ui";
 import { useTheme } from "../context/ThemeContext";
 import { readableAccent } from "../lib/color";
 
-const PHASE_ORDER = ["identify", "protect", "detect", "respond", "recover"] as const;
+const PHASE_ORDER = ["identify", "protect", "detect", "govern", "respond", "recover"] as const;
 const PHASE_LABELS: Record<string, string> = {
-  identify: "🔎 Identify", protect: "🛡️ Protect", detect: "🚨 Detect", respond: "🚑 Respond", recover: "♻️ Recover",
+  identify: "🔎 Identify", protect: "🛡️ Protect", detect: "🚨 Detect", respond: "🚑 Respond", recover: "♻️ Recover", govern: "🏛️ Govern",
 };
 
 export function AgentsPage() {
@@ -24,7 +24,7 @@ export function AgentsPage() {
     <div>
       <div className="hero-banner">
         <div className="hero-title">🤖 Agents Repository</div>
-        <div className="hero-subtitle">{totalAgents} specialised security agents across the 5 NIST CSF phases</div>
+        <div className="hero-subtitle">{totalAgents} specialised security agents across the 6 NIST CSF phases</div>
       </div>
 
       <div className="top-tabs">

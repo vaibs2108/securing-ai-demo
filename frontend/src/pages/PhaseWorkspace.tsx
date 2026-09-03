@@ -1,18 +1,41 @@
 import { useEffect, useMemo, useState } from "react";
-import { useParams } from "react-router-dom";
+import { useParams, useNavigate, Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import type { PhaseKey, RunStageResponse, Stage, TicketResult } from "../lib/types";
-import { TopTabs } from "../components/TopTabs";
 import { Chart } from "../components/Chart";
 import { Badge, DataTable, GlassCard, LoadingBlock, severityVariant } from "../components/ui";
 import { useTheme } from "../context/ThemeContext";
 import { readableAccent } from "../lib/color";
+import { AttackExchange, getAttackRows } from "../components/AttackExchange";
+import { AttackPath } from "../components/AttackPath";
+import { RecoverProof } from "../components/RecoverProof";
+import { SlackApprovalCard } from "../components/SlackApprovalCard";
+import { Expandable } from "../components/Expandable";
+import { LakeraTestPanel } from "../components/LakeraTestPanel";
+import { GarakPyritLivePanel } from "../components/GarakPyritLivePanel";
+import { LiveVulnerabilityDemo } from "../components/LiveVulnerabilityDemo";
 
+// Canonical story order — matches the real backend data-generation order
+// (app/data/live_engine.py's generate_all()): Govern's real evaluation
+// needs Identify/Protect/Detect's real findings first, so it runs (and is
+// shown) right after Detect, feeding Respond/Recover's own real
+// consolidated incident_queue in turn.
+const STORY_ORDER: PhaseKey[] = ["identify", "protect", "detect", "govern", "respond", "recover"];
+const STORY_LABELS: Record<string, string> = {
+  govern: "Govern", identify: "Identify", protect: "Protect", detect: "Detect", respond: "Respond", recover: "Recover",
+};
+
+// Both options analyse the same real data (LiveDataEngine — the real
+// meridian-support-agent repo + deployed agent, never synthetic, no
+// upload path since there's nothing to upload in this demo). "mcp" adds
+// real-time external enrichment on top for the stages that support one; it
+// isn't a fallback tier, it's strictly additive — and it isn't tied to any
+// one named vendor, since which external source actually applies depends
+// on the stage and what's connected in Settings.
 const DATA_SOURCE_OPTIONS: { value: string; label: string }[] = [
-  { value: "mcp", label: "API/MCP Live Tools (Priority 1)" },
-  { value: "upload", label: "File Upload Ingestion (Priority 2)" },
-  { value: "synthetic", label: "Synthetic Data Engine (Priority 3)" },
+  { value: "live", label: "GitHub Repo + Deployed Agent" },
+  { value: "mcp", label: "+ External Source (SIEM / Security API, via MCP)" },
 ];
 
 const FRAMEWORK_VARIANT = (fw: string): string => {
@@ -30,14 +53,57 @@ interface WorkflowState {
   servicenow?: TicketResult;
 }
 
+/** Surfaces GuardrailManager's real V5_THRESHOLDS gate logic (app/guardrails/validator.py)
+ * as a "Policy → Decision → Control → Evidence" strip, instead of only exposing the bare
+ * hitl_required boolean it resolves to. */
+function PolicyDecisionTrace({ trace, accent }: { trace: import("../lib/types").PolicyDecisionTrace; accent: string }) {
+  const decisionColor = trace.decision ? "var(--accent-amber)" : "var(--accent-green)";
+  const steps: { label: string; value: string; color?: string }[] = [
+    { label: "Policy", value: trace.policy ?? "—" },
+    { label: "Control", value: trace.control ?? "—" },
+    { label: "Decision", value: trace.decision ? "Human Approval Required" : "Auto-Approved", color: decisionColor },
+    { label: "Evidence", value: trace.evidence ?? trace.decision_reason ?? "—" },
+  ];
+  return (
+    <div className="glass-card" style={{ borderLeft: `3px solid ${accent}`, marginBottom: 20, padding: "14px 16px" }}>
+      <div style={{ fontSize: "0.72rem", fontWeight: 700, letterSpacing: "0.04em", color: "var(--text-muted)", textTransform: "uppercase", marginBottom: 10 }}>
+        ⚖️ Policy Decision Trace
+      </div>
+      <div style={{ display: "flex", alignItems: "stretch", gap: 0, flexWrap: "wrap" }}>
+        {steps.map((s, i) => (
+          <div key={s.label} style={{ display: "flex", alignItems: "center" }}>
+            <div style={{ minWidth: 160, maxWidth: 240 }}>
+              <div style={{ fontSize: "0.68rem", color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.03em", marginBottom: 3 }}>{s.label}</div>
+              <div style={{ fontSize: "0.8rem", color: s.color ?? "var(--text-primary)", fontWeight: s.color ? 700 : 500, lineHeight: 1.4, wordBreak: "break-word" }}>{s.value}</div>
+            </div>
+            {i < steps.length - 1 && <div style={{ margin: "0 14px", color: "var(--text-muted)", fontSize: "1.1rem", alignSelf: "center" }}>→</div>}
+          </div>
+        ))}
+      </div>
+      {trace.decision_reason && trace.evidence && (
+        <div style={{ marginTop: 10, fontSize: "0.78rem", color: "var(--text-secondary)", borderTop: "1px solid var(--border-glass)", paddingTop: 8 }}>
+          {trace.decision_reason}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function PhaseWorkspace() {
   const { uc } = useParams<{ uc: PhaseKey }>();
   const phase = (uc ?? "identify") as PhaseKey;
   const qc = useQueryClient();
   const { theme } = useTheme();
+  const navigate = useNavigate();
 
   const stagesQ = useQuery({ queryKey: ["phase-stages", phase], queryFn: () => api.phaseStages(phase) });
   const stateQ = useQuery({ queryKey: ["phase-state", phase], queryFn: () => api.phaseState(phase) });
+  // Same queryKey the Sidebar already uses — shares its cache rather than
+  // issuing a second real fetch.
+  const settingsQ = useQuery({ queryKey: ["settings"], queryFn: api.settings, staleTime: 30_000 });
+  // Same queryKey the StoryBar/Sidebar already use — shares cache, no extra fetch.
+  const dashboardQ = useQuery({ queryKey: ["dashboard"], queryFn: api.dashboard, staleTime: 30_000 });
+  const fetchError = dashboardQ.data?.data_health?.[phase];
 
   const [dataSource, setDataSource] = useState<Record<string, string>>({});
   const [categoryFilter, setCategoryFilter] = useState<Record<string, string>>({});
@@ -67,7 +133,7 @@ export function PhaseWorkspace() {
   });
 
   const runMut = useMutation({
-    mutationFn: (stageKey: string) => api.runStage(phase, stageKey, dataSource[stageKey] ?? "synthetic"),
+    mutationFn: (stageKey: string) => api.runStage(phase, stageKey, dataSource[stageKey] ?? "live"),
     onSuccess: (res, stageKey) => {
       setRunResult((prev) => ({ ...prev, [stageKey]: res }));
       qc.invalidateQueries({ queryKey: ["phase-state", phase] });
@@ -115,7 +181,7 @@ export function PhaseWorkspace() {
     });
   }
 
-  if (stagesQ.isLoading || !stagesQ.data) return <><TopTabs /><LoadingBlock label={`Loading ${phase}…`} /></>;
+  if (stagesQ.isLoading || !stagesQ.data) return <LoadingBlock label={`Loading ${phase}…`} />;
 
   const overview = stagesQ.data.overview;
   const color = stagesQ.data.color;
@@ -128,7 +194,6 @@ export function PhaseWorkspace() {
 
   return (
     <div>
-      <TopTabs />
       <h1 style={{ color: textColor, marginBottom: 8, fontSize: "1.6rem" }}>{overview.title}</h1>
 
       <div className="overview-card" style={{ borderTop: `3px solid ${color}` }}>
@@ -184,8 +249,11 @@ export function PhaseWorkspace() {
                   <div style={{ fontSize: "0.72rem", textTransform: "uppercase", letterSpacing: "0.05em", color: textColor, fontWeight: 700, marginBottom: 4 }}>
                     {activeIndex === 0 ? "📁 Target Ingested Dataset" : "🔄 Input Payload (From Previous Stage)"}
                   </div>
-                  <div style={{ fontWeight: 700, marginBottom: 6, color: "var(--text-heading)" }}>{activeStage.io.input_name}</div>
-                  <div style={{ fontSize: "0.78rem", color: "var(--text-secondary)", marginBottom: 10 }}>{activeStage.io.input_desc}</div>
+                  <div style={{ marginBottom: 6 }}>
+                    <Expandable trigger={<span style={{ fontWeight: 700, color: "var(--text-heading)" }}>{activeStage.io.input_name}</span>}>
+                      <div style={{ fontSize: "0.78rem", color: "var(--text-secondary)" }}>{activeStage.io.input_desc}</div>
+                    </Expandable>
+                  </div>
                   <div style={{ display: "flex", gap: 12, fontSize: "0.75rem", fontFamily: "JetBrains Mono, monospace", background: "rgba(var(--overlay-rgb), 0.05)", padding: "6px 8px", borderRadius: 4 }}>
                     <span>📊 {activeStage.input_row_count.toLocaleString()} rows</span>
                     <span>🎛️ {activeStage.input_columns.length} columns</span>
@@ -200,13 +268,29 @@ export function PhaseWorkspace() {
                 )}
 
                 <label className="field-label">Data Source Provider</label>
+                {settingsQ.data?.github_target_repo && (
+                  <div className="muted" style={{ fontSize: "0.76rem", marginBottom: 8 }}>
+                    🎯 Targeting{" "}
+                    <a href={`https://github.com/${settingsQ.data.github_target_repo}`} target="_blank" rel="noreferrer">
+                      {settingsQ.data.github_target_repo}
+                    </a>
+                    {settingsQ.data.target_agent_url && <> · deployed agent at <code>{settingsQ.data.target_agent_url}</code></>}
+                    {" · "}
+                    <Link to="/settings" style={{ color: "var(--accent-blue)" }}>Change target →</Link>
+                  </div>
+                )}
+                {fetchError && (
+                  <div style={{ background: "rgba(255,68,68,0.08)", border: "1px solid var(--accent-red)", borderRadius: 8, padding: "8px 10px", marginBottom: 10, fontSize: "0.76rem", color: "var(--accent-red)" }}>
+                    ⚠️ Couldn't fetch real {phase} data from this target: {fetchError}
+                  </div>
+                )}
                 <div className="radio-group" style={{ marginBottom: 12 }}>
                   {DATA_SOURCE_OPTIONS.map((opt) => (
                     <label className="radio-option" key={opt.value}>
                       <input
                         type="radio"
                         name={`ds-${activeStage.key}`}
-                        checked={(dataSource[activeStage.key] ?? "synthetic") === opt.value}
+                        checked={(dataSource[activeStage.key] ?? "live") === opt.value}
                         onChange={() => setDataSource((prev) => ({ ...prev, [activeStage.key]: opt.value }))}
                       />
                       {opt.label}
@@ -257,26 +341,33 @@ export function PhaseWorkspace() {
                 <div style={{ background: "rgba(var(--overlay-rgb), 0.03)", border: "1px solid var(--border-glass)", borderRadius: 12, padding: "14px 18px", minHeight: 200 }}>
                   <div style={{ fontSize: "0.72rem", textTransform: "uppercase", color: "var(--text-muted)", fontWeight: 700, marginBottom: 10 }}>Active Security Shields</div>
                   <div style={{ marginBottom: 10 }}>
-                    <Badge variant="green">🟢 Structured JSON Extraction</Badge>
-                    <div style={{ fontSize: "0.68rem", color: "var(--text-secondary)", marginTop: 4 }}>
-                      Extracts and parses the agent's JSON response, tolerating preamble text or code fences —
-                      malformed output degrades to a raw-text fallback instead of crashing.
-                    </div>
+                    <Expandable trigger={<Badge variant="green">🟢 Structured JSON Extraction</Badge>}>
+                      <div style={{ fontSize: "0.68rem", color: "var(--text-secondary)" }}>
+                        Extracts and parses the agent's JSON response, tolerating preamble text or code fences —
+                        malformed output degrades to a raw-text fallback instead of crashing.
+                      </div>
+                    </Expandable>
                   </div>
                   <div style={{ marginBottom: 10 }}>
-                    <Badge variant="green">🟢 Hallucination Cross-Check</Badge>
-                    <div style={{ fontSize: "0.68rem", color: "var(--text-secondary)", marginTop: 4 }}>
-                      After execution, every cited CVE, MITRE ATT&amp;CK/ATLAS technique, and agent reference is
-                      checked against real sources — see the Observability tab for this stage's report.
-                    </div>
+                    <Expandable trigger={<Badge variant="green">🟢 Hallucination Cross-Check</Badge>}>
+                      <div style={{ fontSize: "0.68rem", color: "var(--text-secondary)" }}>
+                        After execution, every cited CVE, MITRE ATT&amp;CK/ATLAS technique, and agent reference is
+                        checked against real sources — see the Observability tab for this stage's report.
+                      </div>
+                    </Expandable>
                   </div>
                   <div>
-                    <Badge variant={activeStage.ui_config.hitl ? "amber" : "blue"}>
-                      {activeStage.ui_config.hitl ? "🟡 HITL Gate Active" : "🟢 Automated — Advisory"}
-                    </Badge>
-                    <div style={{ fontSize: "0.68rem", color: "var(--text-secondary)", marginTop: 4 }}>
-                      {activeStage.ui_config.hitl ? "Critical-severity findings require manual analyst approval before handoff." : "Findings feed directly into the next stage without a manual gate."}
-                    </div>
+                    <Expandable
+                      trigger={
+                        <Badge variant={activeStage.ui_config.hitl ? "amber" : "blue"}>
+                          {activeStage.ui_config.hitl ? "🟡 HITL Gate Active" : "🟢 Automated — Advisory"}
+                        </Badge>
+                      }
+                    >
+                      <div style={{ fontSize: "0.68rem", color: "var(--text-secondary)" }}>
+                        {activeStage.ui_config.hitl ? "Critical-severity findings require manual analyst approval before handoff." : "Findings feed directly into the next stage without a manual gate."}
+                      </div>
+                    </Expandable>
                   </div>
                 </div>
               </div>
@@ -291,6 +382,10 @@ export function PhaseWorkspace() {
             <div className="divider" />
             <div className="content"><span className="label">📄 Expected Output:</span> {activeStage.agent_info.output}</div>
           </div>
+
+          {phase === "protect" && activeStage.key === "guardrail_proxy" && <LakeraTestPanel />}
+          {phase === "detect" && (activeStage.key === "injection_detection" || activeStage.key === "red_teaming") && <GarakPyritLivePanel />}
+          {phase === "detect" && activeStage.key === "injection_detection" && <LiveVulnerabilityDemo />}
 
           <button
             className="btn btn-execute"
@@ -321,14 +416,26 @@ export function PhaseWorkspace() {
 
               {resultTab === "analysis" && (
                 <div className="ai-panel">
-                  {dataSource[activeStage.key] === "synthetic" || !dataSource[activeStage.key] ? (
-                    <div className="synthetic-banner">⚠️ Synthetic Data — This analysis uses AI-generated demonstration data.</div>
-                  ) : null}
                   {result && result.live_mcp_used.length > 0 && (
                     <div className="badge badge-green" style={{ marginBottom: 12 }}>
                       🟢 Includes real live data from: {result.live_mcp_used.join(", ")}
                     </div>
                   )}
+                  {(() => {
+                    // The real Lakera rows this run actually used to enrich the LLM's
+                    // analysis — the LLM's findings paraphrase them, but nothing showed
+                    // the raw real API results themselves anywhere on this page. This
+                    // is that: the same rows outcome.aggregation already carries, not a
+                    // separate fetch.
+                    const lakeraAgg = outcome.aggregation?.lakera_guard_live_results;
+                    if (!lakeraAgg?.rows?.length) return null;
+                    return (
+                      <div style={{ marginBottom: 16 }}>
+                        <h4 style={{ marginBottom: 6 }}>🛡️ Real Lakera Guard results used in this run</h4>
+                        <DataTable columns={lakeraAgg.columns ?? Object.keys(lakeraAgg.rows[0])} records={lakeraAgg.rows} />
+                      </div>
+                    );
+                  })()}
                   {outcome.error && <div className="login-error" style={{ marginBottom: 12 }}>Agent execution failed: {outcome.error}</div>}
 
                   <div className="grid-4" style={{ marginBottom: 20 }}>
@@ -338,21 +445,76 @@ export function PhaseWorkspace() {
                     <div className="metric-card"><div className="metric-value" style={{ color: textColor }}>{outcome.recommendations.length}</div><div className="metric-label">Recommendations</div></div>
                   </div>
 
+                  {result?.policy_decision_trace && <PolicyDecisionTrace trace={result.policy_decision_trace} accent={color} />}
+
+                  {phase === "recover" && activeStage.key === "rollback" && (
+                    <>
+                      <RecoverProof />
+                      <SlackApprovalCard
+                        uc={phase}
+                        stageKey={activeStage.key}
+                        summary={outcome.summary}
+                        actionType="restore_target_agent"
+                        actionLabel="Restore the target agent to active service"
+                      />
+                    </>
+                  )}
+                  {phase === "respond" && activeStage.key === "containment" && (
+                    <SlackApprovalCard
+                      uc={phase}
+                      stageKey={activeStage.key}
+                      summary={outcome.summary}
+                      actionType="suspend_target_agent"
+                      actionLabel="Suspend the target agent"
+                    />
+                  )}
+
                   <h4>Analysis Summary</h4>
                   <p style={{ color: "var(--text-secondary)", whiteSpace: "pre-line", fontSize: "0.9rem", lineHeight: 1.6 }}>{outcome.summary}</p>
 
-                  <h4>AI-Scored Findings Catalog</h4>
-                  {outcome.findings.map((f) => (
-                    <div className="finding-card" key={f.id}>
-                      <div className="top">
-                        <span className="title">{f.title}</span>
-                        <Badge variant={severityVariant(f.severity)}>{f.severity.toUpperCase()}</Badge>
-                      </div>
-                      <div className="desc">{f.description}</div>
-                      <div className="meta"><strong>Evidence:</strong> {f.evidence}</div>
-                      <div className="meta"><strong>Recommendation:</strong> {f.recommendation}</div>
-                    </div>
-                  ))}
+                  {(() => {
+                    const isDetectAttack = phase === "detect" && (activeStage.key === "injection_detection" || activeStage.key === "red_teaming");
+                    const attackRows = isDetectAttack ? getAttackRows(outcome) : [];
+                    if (attackRows.length > 0) {
+                      return (
+                        <>
+                          <div style={{ background: "rgba(255,68,68,0.06)", border: "1px solid var(--accent-red)33", borderRadius: 8, padding: "8px 10px", marginBottom: 14, fontSize: "0.78rem", color: "var(--text-secondary)" }}>
+                            ⚠️ These real attacks are sent <strong>directly</strong> to the target agent — deliberately
+                            bypassing Protect's real Guardrail Proxy. That's the point: Detect measures raw exposure,
+                            what an attacker who skips your defenses actually faces, not what Protect would have
+                            caught if the traffic had been routed through it. See Protect → Guardrail Proxy for that
+                            real, separate test.
+                          </div>
+                          <h4>Attack path</h4>
+                          <AttackPath rows={attackRows} />
+                          <h4>Attack exchange (real prompts and responses)</h4>
+                          <AttackExchange rows={attackRows} />
+                        </>
+                      );
+                    }
+                    const toolBadge = (result?.live_mcp_used ?? [])
+                      .map((k) => ({ garak_live_scan: "🐛 real garak scan", pyrit_live_scan: "🎯 real pyrit scan", lakera_guard_live_results: "🔰 real lakera scan" }[k]))
+                      .find((v) => v);
+                    return (
+                      <>
+                        <h4>AI-Scored Findings Catalog</h4>
+                        {outcome.findings.map((f) => (
+                          <div className="finding-card" key={f.id}>
+                            <div className="top">
+                              <span className="title">{f.title}</span>
+                              <div style={{ display: "flex", gap: 6 }}>
+                                {toolBadge && <Badge variant="blue">{toolBadge}</Badge>}
+                                <Badge variant={severityVariant(f.severity)}>{f.severity.toUpperCase()}</Badge>
+                              </div>
+                            </div>
+                            <div className="desc">{f.description}</div>
+                            <div className="meta"><strong>Evidence:</strong> {f.evidence}</div>
+                            <div className="meta"><strong>Recommendation:</strong> {f.recommendation}</div>
+                          </div>
+                        ))}
+                      </>
+                    );
+                  })()}
 
                   {outcome.step_by_step_execution?.length > 0 && (
                     <>
@@ -387,12 +549,35 @@ export function PhaseWorkspace() {
                           </button>
                         )}
                       </div>
+                      {phase === "protect" && activeStage.key === "guardrail_proxy" && result.output_preview.row_count === 0 && (
+                        <div style={{ background: "rgba(var(--overlay-rgb), 0.04)", border: "1px solid var(--border-glass)", borderRadius: 8, padding: "8px 10px", marginBottom: 12, fontSize: "0.76rem", color: "var(--text-secondary)" }}>
+                          ℹ️ This will always show 0 rows — real, not a bug. No guardrail middleware currently
+                          intercepts real traffic in front of the target agent, so there's honestly nothing to log
+                          here yet.{result.live_mcp_used.includes("lakera_guard_live_results") && (
+                            <> This run's real Lakera Guard results are on the <strong>🧠 AI Analysis</strong> tab
+                            instead — that's a separate real proof, not this stage's own output dataset.</>
+                          )}
+                        </div>
+                      )}
                       <DataTable columns={result.output_preview.columns} records={result.output_preview.records} />
                     </>
                   ) : (
                     <p className="muted">Run this stage to see the output dataset preview.</p>
                   )}
-                  <p style={{ marginTop: 14, fontSize: "0.85rem", color: "var(--text-secondary)" }}>{outcome.passed_to_next_stage}</p>
+                  {outcome.passed_to_next_stage && (
+                    <div style={{ marginTop: 14, paddingTop: 12, borderTop: "1px solid var(--border-glass)" }}>
+                      <div style={{ fontSize: "0.68rem", textTransform: "uppercase", letterSpacing: "0.04em", color: "var(--text-muted)", fontWeight: 700, marginBottom: 4 }}>
+                        🔄 Handoff Note
+                      </div>
+                      {/^[\[{]/.test(outcome.passed_to_next_stage.trim()) ? (
+                        <pre style={{ fontSize: "0.76rem", color: "var(--text-secondary)", whiteSpace: "pre-wrap", wordBreak: "break-word", margin: 0, fontFamily: "JetBrains Mono, monospace" }}>
+                          {outcome.passed_to_next_stage}
+                        </pre>
+                      ) : (
+                        <p style={{ fontSize: "0.85rem", color: "var(--text-secondary)", margin: 0 }}>{outcome.passed_to_next_stage}</p>
+                      )}
+                    </div>
+                  )}
                 </GlassCard>
               )}
 
@@ -459,6 +644,32 @@ export function PhaseWorkspace() {
           {hitlApprovedMap[activeStage.key] === false && (
             <div className="badge badge-red" style={{ marginTop: 12 }}>❌ Rejected for further review.</div>
           )}
+
+          {/* Guided storyboard: once this stage's real result is in (and any
+              HITL gate is resolved, not pending/rejected), offer the next
+              step in the story — free navigation via the tabs/pills above
+              still works, this is just the default forward path. */}
+          {outcome && !(result?.hitl_required && hitlApprovedMap[activeStage.key] === undefined) && hitlApprovedMap[activeStage.key] !== false && (() => {
+            const stageIdx = stages.findIndex((s) => s.key === activeStage.key);
+            const nextStage = stageIdx >= 0 ? stages[stageIdx + 1] : undefined;
+            const storyIdx = STORY_ORDER.indexOf(phase);
+            const nextPhase = storyIdx >= 0 && storyIdx < STORY_ORDER.length - 1 ? STORY_ORDER[storyIdx + 1] : null;
+            const label = nextStage
+              ? `Continue to ${nextStage.name} →`
+              : nextPhase
+              ? `Continue to ${STORY_LABELS[nextPhase]} →`
+              : "Story complete — back to dashboard →";
+            function handleContinue() {
+              if (nextStage) setActiveStageMut.mutate(stageIdx + 1);
+              else if (nextPhase) navigate(`/phase/${nextPhase}`);
+              else navigate("/");
+            }
+            return (
+              <button className="btn" style={{ marginTop: 16, background: color, borderColor: color }} onClick={handleContinue}>
+                {label}
+              </button>
+            );
+          })()}
         </>
       )}
     </div>

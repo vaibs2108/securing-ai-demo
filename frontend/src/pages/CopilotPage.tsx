@@ -10,7 +10,7 @@ interface ChatMessage {
 }
 
 const PIPELINE_STEPS = [
-  { icon: "📊", label: "Synthetic Data", sub: "16 Datasets" },
+  { icon: "📊", label: "Live Data", sub: "17 Datasets" },
   { icon: "📁", label: "Uploads", sub: "Live File Context" },
   { icon: "🧠", label: "FAISS Core", sub: "Vector Store" },
   { icon: "🔍", label: "Hybrid Search", sub: "Semantic + BM25" },
@@ -96,7 +96,7 @@ export function CopilotPage() {
                 <div style={{ fontSize: "1.8rem" }}>{step.icon}</div>
                 <div style={{ fontSize: "0.78rem", fontWeight: 700, marginTop: 4 }}>{step.label}</div>
                 <div className="muted" style={{ fontSize: "0.68rem" }}>{step.sub}</div>
-                {step.label === "Synthetic Data" && (
+                {step.label === "Live Data" && (
                   <div style={{ marginTop: 4 }}>
                     <Badge variant={memory?.ready ? "green" : "amber"}>
                       {memory?.ready ? `${memory.total_dataset_vectors} vectors` : `${datasetsIndexed}/${datasetsTotal} indexing…`}
@@ -132,7 +132,7 @@ export function CopilotPage() {
           <div style={{ marginTop: 14 }}>
             <p className="muted" style={{ fontSize: "0.85rem", marginBottom: 12 }}>
               Upload policies, logs, or code files. The Copilot chunks, embeds, and adds them to the FAISS vector
-              store for real-time retrieval alongside the platform's synthetic datasets.
+              store for real-time retrieval alongside the platform's real live datasets.
             </p>
             <div className="flex-row" style={{ marginBottom: 12 }}>
               <button className="btn" onClick={() => fileInputRef.current?.click()} disabled={uploadMut.isPending}>

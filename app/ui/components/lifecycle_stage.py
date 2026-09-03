@@ -42,6 +42,9 @@ def _get_previous_stage_output(use_case: str, stage_key: str) -> str:
         "recover": {
             "guardrail_update": "Config & Prompt Rollback stage produced a rollback event log with reason, initiator, and outcome per reverted agent configuration.",
         },
+        "govern": {
+            "compliance_evaluation": "Policy Catalog stage confirmed the real governance policy's ownership, versioning, and framework-mapping traceability, ready for real-time evaluation against live cross-phase state.",
+        },
     }
 
     return prev_output_map.get(use_case, {}).get(stage_key, "")
@@ -158,6 +161,22 @@ STAGE_DEFINITIONS: Dict[str, List[Dict[str, str]]] = {
             "agent": "GuardrailUpdateAgent",
         },
     ],
+    "govern": [
+        {
+            "key": "policy_catalog",
+            "name": "Policy Catalog & Traceability",
+            "icon": "🏛️",
+            "description": "Catalog the real, authored governance policy and confirm every rule has a clear owner, version, and mapped compliance framework reference.",
+            "agent": "GovernPolicyAgent",
+        },
+        {
+            "key": "compliance_evaluation",
+            "name": "Real-Time Compliance Evaluation",
+            "icon": "⚖️",
+            "description": "Evaluate each policy rule's real condition against live Identify/Protect/Detect state and issue a compliance decision with cited evidence.",
+            "agent": "GovernComplianceAgent",
+        },
+    ],
 }
 
 
@@ -269,8 +288,8 @@ STAGE_INPUT_OUTPUT_MAP = {
     "respond": {
         "containment": {
             "input_key": "incident_queue",
-            "input_name": "Security Incident Queue",
-            "input_desc": "Open incidents triggered by guardrail events, red-team findings, or behaviour anomalies.",
+            "input_name": "Consolidated Security Incident Queue",
+            "input_desc": "Every real open finding across Govern (triggered rules), Identify (elevated agent risk), Protect (unisolated secrets), and Detect (genuine jailbreaks) — one live-computed queue, not a single fixed incident.",
             "output_key": "containment_actions",
             "output_name": "Containment Action Log",
             "output_desc": "Isolate/revoke/disable/rate-limit actions taken per incident, with automation and HITL-approval status.",
@@ -296,10 +315,32 @@ STAGE_INPUT_OUTPUT_MAP = {
         "guardrail_update": {
             "input_key": "rollback_events",
             "input_name": "Rollback Event Log",
-            "input_desc": "Rollback outcomes and root-cause reasons feeding the guardrail update loop.",
+            "input_desc": "Rollback outcomes and root-cause reasons feeding the guardrail update loop — cross-referenced against the same live Consolidated Security Incident Queue Respond uses, so this stage's real analysis can name which open Govern/Identify/Protect/Detect items still lack a deployed update.",
             "output_key": "guardrail_update_log",
             "output_name": "Guardrail Update Log",
             "output_desc": "Policy updates deployed from red-team/incident findings, with before/after block-rate effectiveness.",
+        },
+    },
+    "govern": {
+        "policy_catalog": {
+            # Reuses Protect's real guardrail_policies rows deliberately —
+            # both stages read the same real governance/policy.yaml rules,
+            # just through a different analytical lens (enforcement config
+            # vs. ownership/traceability). No separate raw dataset exists.
+            "input_key": "guardrail_policies",
+            "input_name": "Governance Policy Library (Real, Authored)",
+            "input_desc": "The real governance/policy.yaml rules, fetched and parsed from the target repo, awaiting AI-reviewed traceability confirmation.",
+            "output_key": "guardrail_policies",
+            "output_name": "Governance Policy Library (Reviewed)",
+            "output_desc": "The same real rules with ownership, versioning, and framework-mapping completeness confirmed by AI review.",
+        },
+        "compliance_evaluation": {
+            "input_key": "governance_compliance_evaluation",
+            "input_name": "Real-Time Compliance Evaluation (Computed)",
+            "input_desc": "Each real policy rule's condition, deterministically evaluated in code against real live Identify/Protect/Detect state, awaiting an AI-reviewed compliance narrative.",
+            "output_key": "governance_compliance_evaluation",
+            "output_name": "Real-Time Compliance Evaluation (Reviewed)",
+            "output_desc": "The same real evaluation with a compliance narrative and remediation guidance confirmed by AI review.",
         },
     },
 }
@@ -336,6 +377,10 @@ def get_dataset_name_for_stage(use_case: str, stage_key: str) -> str:
         "recover": {
             "rollback": "Config Version Snapshots (100 versions)",
             "guardrail_update": "Guardrail Update Log (60 policy updates)",
+        },
+        "govern": {
+            "policy_catalog": "Governance Policy Library (real policy.yaml rules)",
+            "compliance_evaluation": "Real-Time Compliance Evaluation (live cross-phase check)",
         },
     }
     return mappings.get(use_case, {}).get(stage_key, "Security Event Telemetry")
@@ -421,6 +466,18 @@ def get_agent_details_for_stage(use_case: str, stage_key: str) -> dict:
                 "agent": "GuardrailUpdateAgent",
                 "analysis": "Feeds red-team and incident findings back into guardrail policy updates and measures the resulting effectiveness delta.",
                 "output": "Deployed guardrail policy updates with before/after block-rate improvement."
+            },
+        },
+        "govern": {
+            "policy_catalog": {
+                "agent": "GovernPolicyAgent",
+                "analysis": "Reviews the real, authored governance policy for ownership, versioning, and compliance-framework traceability.",
+                "output": "Governance policy library with traceability gaps flagged per rule."
+            },
+            "compliance_evaluation": {
+                "agent": "GovernComplianceAgent",
+                "analysis": "Evaluates each policy rule's real condition against live Identify/Protect/Detect state and reports the resulting compliance decision.",
+                "output": "Per-rule compliance decision (Compliant / Blocked / Human Approval Required / Remediation Required) with cited real evidence."
             },
         },
     }

@@ -8,15 +8,21 @@ here — this module is orchestration + JSON shaping only.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
+import json
+import logging
 import os
 import random
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import httpx
 import pandas as pd
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException, UploadFile, File, Response
+from fastapi import Depends, FastAPI, HTTPException, Request, UploadFile, File, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -36,6 +42,7 @@ settings_store.apply_to_environment()
 
 from backend.state import state
 from backend.security import issue_token, get_current_user
+from app.mcp.client import MCPClient
 from backend.utils import df_to_records, chart_data, hitl_candidates
 from backend.data_content import (
     USE_CASE_OVERVIEW, USE_CASE_COLOURS, USE_CASE_LABELS,
@@ -111,6 +118,67 @@ def me(user: dict = Depends(get_current_user)) -> Dict[str, Any]:
 # Dashboard
 # ═══════════════════════════════════════════════════════════════════════════
 
+def _compute_storyline() -> List[Dict[str, str]]:
+    """Real per-phase status for the story bar's case-file thread — derived
+    entirely from state.datasets already fetched this run, no new calls.
+    Mirrors the same `if df is not None and not df.empty` checks
+    KPIEngine already uses throughout app/kpi/engine.py."""
+    ds = state.datasets
+
+    def _empty(name: str) -> bool:
+        df = ds.get(name)
+        return df is None or df.empty
+
+    nodes = []
+
+    gov = ds.get("governance_compliance_evaluation")
+    if _empty("governance_compliance_evaluation"):
+        nodes.append({"phase": "govern", "status": "pending", "label": "policy not loaded"})
+    else:
+        triggered = int(gov["triggered"].sum())
+        nodes.append({"phase": "govern", "status": "warning" if triggered else "clean",
+                      "label": f"{triggered} rule(s) triggered" if triggered else f"{len(gov)} rule(s) compliant"})
+
+    agents = ds.get("ai_agent_inventory")
+    if _empty("ai_agent_inventory"):
+        nodes.append({"phase": "identify", "status": "pending", "label": "no agent discovered yet"})
+    else:
+        risk = ds.get("agent_risk_register")
+        blast = risk.iloc[0]["blast_radius"] if risk is not None and not risk.empty else "unknown"
+        nodes.append({"phase": "identify", "status": "clean", "label": f"{len(agents)} real agent(s) · risk {blast.lower()}"})
+
+    secrets = ds.get("secrets_exposure_scan")
+    if _empty("secrets_exposure_scan") and _empty("guardrail_policies"):
+        nodes.append({"phase": "protect", "status": "pending", "label": "not checked yet"})
+    else:
+        gaps = int(secrets["isolation_status"].astype(str).str.contains("Not Isolated|Exposed", case=False, regex=True).sum()) if secrets is not None and not secrets.empty else 0
+        nodes.append({"phase": "protect", "status": "warning" if gaps else "clean",
+                      "label": f"{gaps} gap(s) found" if gaps else "no gaps found"})
+
+    redteam = ds.get("redteam_campaign_results")
+    if _empty("redteam_campaign_results"):
+        nodes.append({"phase": "detect", "status": "pending", "label": "not tested yet"})
+    else:
+        leaked = bool((redteam["outcome"] == "Success").any())
+        nodes.append({"phase": "detect", "status": "critical" if leaked else "clean",
+                      "label": "leak confirmed" if leaked else "no leak found"})
+
+    if _empty("containment_actions"):
+        if not _empty("incident_queue"):
+            nodes.append({"phase": "respond", "status": "warning", "label": "incident open"})
+        else:
+            nodes.append({"phase": "respond", "status": "pending", "label": "no incident yet"})
+    else:
+        nodes.append({"phase": "respond", "status": "resolved", "label": "agent contained"})
+
+    if _empty("rollback_events") and _empty("guardrail_update_log"):
+        nodes.append({"phase": "recover", "status": "pending", "label": "no fix yet"})
+    else:
+        nodes.append({"phase": "recover", "status": "resolved", "label": "fix verified"})
+
+    return nodes
+
+
 @app.get("/api/dashboard")
 def dashboard(user: dict = Depends(get_current_user)) -> Dict[str, Any]:
     kpi = state.kpi_engine
@@ -119,7 +187,7 @@ def dashboard(user: dict = Depends(get_current_user)) -> Dict[str, Any]:
 
     gauges = [
         {"phase": uc, "label": USE_CASE_LABELS[uc], "score": kpi.get_use_case_score(uc), "color": USE_CASE_COLOURS[uc]}
-        for uc in ["identify", "protect", "detect", "respond", "recover"]
+        for uc in ["identify", "protect", "detect", "govern", "respond", "recover"]
     ]
 
     operational = [
@@ -133,7 +201,7 @@ def dashboard(user: dict = Depends(get_current_user)) -> Dict[str, Any]:
 
     # Real recorded history, not a fabricated random walk — see
     # app/observability/score_history.py for why this replaced _synth_trend().
-    phase_scores = {uc: kpi.get_use_case_score(uc) for uc in ["identify", "protect", "detect", "respond", "recover"]}
+    phase_scores = {uc: kpi.get_use_case_score(uc) for uc in ["identify", "protect", "detect", "govern", "respond", "recover"]}
     score_history.record_snapshot(phase_scores)
     trend = {uc: score_history.get_history(uc, days=30) for uc in phase_scores}
 
@@ -147,17 +215,104 @@ def dashboard(user: dict = Depends(get_current_user)) -> Dict[str, Any]:
         "posture_index": posture_index,
         "gauges": gauges,
         "operational": operational,
+        "storyline": _compute_storyline(),
         "trend": trend,
         "blast_radius": blast_radius,
         "recent_operations": audit,
+        # Real per-phase fetch failures against the current live target —
+        # e.g. a retargeted repo missing governance/policy.yaml, or a token
+        # without access. Empty dict means every phase's real fetch succeeded.
+        "data_health": state.fetch_errors,
     }
+
+
+@app.get("/api/asset-graph")
+def asset_graph(user: dict = Depends(get_current_user)) -> Dict[str, Any]:
+    """The reviewer's specific ask: a connective view of the real entities
+    already flowing through the system — not a new fetch, just a different
+    shape over app.datasets (all real since Milestone 3). Nodes/edges are
+    built directly from real rows; an empty dataset just means fewer nodes,
+    never a fabricated placeholder node."""
+    ds = state.datasets
+    nodes: List[Dict[str, Any]] = []
+    edges: List[Dict[str, Any]] = []
+
+    agents = ds.get("ai_agent_inventory")
+    agent_id = None
+    if agents is not None and not agents.empty:
+        row = agents.iloc[0]
+        agent_id = row["agent_id"]
+        risk_row = ds.get("agent_risk_register")
+        risk_score = None
+        blast_radius = None
+        if risk_row is not None and not risk_row.empty:
+            r = risk_row.iloc[0]
+            risk_score = float(r["risk_score"])
+            blast_radius = r["blast_radius"]
+        nodes.append({
+            "id": agent_id, "type": "agent", "label": row["agent_name"],
+            "detail": f"{row['agent_type']} · {row['sanctioned_status']} · {row['llm_provider']}",
+            "risk_score": risk_score, "blast_radius": blast_radius,
+            "internet_facing": bool(row["internet_facing"]),
+        })
+
+    lineage = ds.get("model_data_lineage")
+    if agent_id and lineage is not None and not lineage.empty:
+        for _, m in lineage.iterrows():
+            mid = f"model:{m['model_id']}"
+            nodes.append({"id": mid, "type": "model", "label": m["model_name"], "detail": f"base: {m['base_model']}"})
+            edges.append({"from": mid, "to": agent_id, "label": "powers"})
+
+    tool_access = ds.get("tool_access_map")
+    if agent_id and tool_access is not None and not tool_access.empty:
+        for _, t in tool_access.iterrows():
+            tid = f"identity:{t['mapping_id']}"
+            nodes.append({
+                "id": tid, "type": "identity", "label": t["tool_name"],
+                "detail": f"{t['granted_permission']} access" + (" — over-provisioned" if bool(t.get("over_provisioned")) else ""),
+            })
+            edges.append({"from": tid, "to": agent_id, "label": t["granted_permission"]})
+
+    secrets = ds.get("secrets_exposure_scan")
+    if agent_id and secrets is not None and not secrets.empty:
+        for _, s in secrets.iterrows():
+            sid = f"secret:{s['secret_id']}"
+            nodes.append({
+                "id": sid, "type": "secret", "label": s["secret_type"][:40],
+                "detail": s["isolation_status"], "critical": "Not Isolated" in str(s["isolation_status"]) or "Exposed" in str(s["isolation_status"]),
+            })
+            edges.append({"from": sid, "to": agent_id, "label": "exposed in"})
+
+    policies = ds.get("guardrail_policies")
+    governance = ds.get("governance_compliance_evaluation")
+    triggered_by_rule = {}
+    if governance is not None and not governance.empty:
+        for _, g in governance.iterrows():
+            triggered_by_rule[g["rule_id"]] = {"triggered": bool(g["triggered"]), "decision": g["decision"]}
+    if agent_id and policies is not None and not policies.empty:
+        for _, p in policies.iterrows():
+            pid = f"policy:{p['policy_id']}"
+            gov = triggered_by_rule.get(p["policy_id"])
+            nodes.append({
+                "id": pid, "type": "policy", "label": p["policy_id"],
+                "detail": p["policy_name"],
+                "triggered": gov["triggered"] if gov else None,
+                "decision": gov["decision"] if gov else None,
+            })
+            edges.append({
+                "from": pid, "to": agent_id,
+                "label": (gov["decision"] if gov else p["enforcement_mode"]),
+                "critical": bool(gov and gov["triggered"]),
+            })
+
+    return {"nodes": nodes, "edges": edges}
 
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Phases / stages
 # ═══════════════════════════════════════════════════════════════════════════
 
-PHASE_KEYS = ["identify", "protect", "detect", "respond", "recover"]
+PHASE_KEYS = ["identify", "protect", "detect", "govern", "respond", "recover"]
 
 
 @app.get("/api/phases")
@@ -235,43 +390,118 @@ def set_active_stage(uc: str, body: SetActiveStageRequest, user: dict = Depends(
 
 
 class RunStageRequest(BaseModel):
-    data_source: str = "synthetic"
+    # "live" (default): the real LiveDataEngine data every stage always
+    # analyses. "mcp": same real base data, plus real-time external
+    # enrichment for the stages that support one — additive, not a fallback
+    # tier. That enrichment is two things under one option, both real: (a)
+    # Lakera/Garak/PyRIT for the three stages they're actually wired to, and
+    # (b) a generic external_source (bring-your-own SIEM/API — see
+    # app/mcp/registry.py) that applies to any stage once genuinely
+    # connected. No more "synthetic"/"upload" — nothing in this app's data
+    # path is fabricated or uploaded any more (Milestone 3+).
+    data_source: str = "live"
 
 
 def _maybe_augment_with_live_mcp(uc: str, stage_key: str, data_source: str) -> Dict[str, pd.DataFrame]:
     """When data_source == 'mcp' and the relevant real tool is actually live
-    (credentials configured — app/mcp/registry.py's 5 real tools only), call
-    it for real and return extra dataset entries to merge into what the
-    agent analyses. Empty dict when not applicable, in which case the run
-    proceeds on the normal 16 synthetic datasets exactly as before — this
-    never fabricates a "live" result."""
+    (credentials configured — app/mcp/registry.py's tools only), call it for
+    real and return extra dataset entries to merge into what the agent
+    analyses. Empty dict when not applicable, in which case the run proceeds
+    on the normal real datasets exactly as before — this never fabricates a
+    "live" result."""
     if data_source != "mcp":
         return {}
 
     extra: Dict[str, pd.DataFrame] = {}
 
+    # Generic external source (SIEM/API) — applies to any stage, unlike the
+    # three tool-specific hooks below, since there's no fixed vendor to
+    # scope it to. Only fires anything when a user has actually configured
+    # SIEM_API_URL/SIEM_API_KEY in Settings; otherwise this is a no-op, same
+    # as every other honest mock-fallback tool in this app.
+    ext_status = state.mcp_client.get_connection_status("external_source")
+    if ext_status["live"]:
+        try:
+            events = state.mcp_client.external_source_fetch_events()
+            if events:
+                extra["external_source_events"] = pd.DataFrame(events)
+        except MCPClient.LiveConnectorError as exc:
+            logging.getLogger(__name__).warning("external_source fetch failed: %s", exc)
+            extra["external_source_events"] = pd.DataFrame([{"note": f"External source fetch failed: {exc}"}])
+
     if uc == "protect" and stage_key == "guardrail_proxy":
         status = state.mcp_client.get_connection_status("lakera_guard")
         if status["live"]:
-            events = state.datasets.get("guardrail_events")
+            # Real prompt samples to screen — deliberately Detect's real
+            # adversarial_prompt_corpus.payload, not guardrail_events. The
+            # latter is honestly *always* empty (no real guardrail
+            # middleware is deployed on the target agent — that's the whole
+            # gap this phase demonstrates), so sourcing samples from it made
+            # this branch permanently unreachable dead code: a real,
+            # correctly-configured LAKERA_API_KEY could never produce a
+            # result because there was never anything to sample. The
+            # adversarial corpus is unconditionally populated every run
+            # (LiveDataEngine._generate_detect()) and is exactly the real
+            # incoming-prompt traffic a real guardrail proxy would screen.
+            corpus = state.datasets.get("adversarial_prompt_corpus")
             samples = (
-                events["input_snippet_redacted"].drop_duplicates().head(5).tolist()
-                if events is not None else []
+                corpus["payload"].drop_duplicates().head(5).tolist()
+                if corpus is not None and not corpus.empty else []
             )
             rows = []
             for text in samples:
                 result = state.mcp_client.screen_prompt(text)
                 rows.append({"prompt_sample": text, "lakera_flagged": result.get("flagged"), "live": result.get("live")})
             if rows:
-                extra["lakera_guard_live_results"] = pd.DataFrame(rows)
+                lakera_df = pd.DataFrame(rows)
+                extra["lakera_guard_live_results"] = lakera_df
+                # Persist beyond this one request, and recompute KPIs from it
+                # immediately — otherwise a real Lakera scan only ever
+                # changed this run's LLM-written prose, never anything the
+                # rest of the app (Guardrail Block Rate, Protect's phase
+                # score, the overall posture index) actually reads. See
+                # app/kpi/engine.py: Guardrail Block Rate now prefers this
+                # real dataset over its static fallback when present.
+                state.datasets["lakera_guard_live_results"] = lakera_df
+                state.recompute_kpis()
 
     elif uc == "detect" and stage_key in ("injection_detection", "red_teaming"):
+        # Real target, not the placeholder "demo-agent-fleet" string this
+        # carried from before the live rebuild (when there was no single
+        # real target to point a runner at) — garak/pyrit need a real,
+        # reachable URL to actually scan.
+        target_agent_url = os.getenv("TARGET_AGENT_URL", "").rstrip("/")
+        scan_target = f"{target_agent_url}/chat" if target_agent_url else "demo-agent-fleet"
         for tool_name in ["garak", "pyrit"]:
             status = state.mcp_client.get_connection_status(tool_name)
             if status["live"]:
-                result = state.mcp_client.trigger_runner_scan(tool_name, target="demo-agent-fleet")
+                result = state.mcp_client.trigger_runner_scan(tool_name, target=scan_target, target_label="Meridian Financial Support Agent")
                 findings = result.get("findings") or []
-                extra[f"{tool_name}_live_scan"] = pd.DataFrame(findings if findings else [{"note": "scan returned no findings"}])
+                errors = result.get("errors")
+                if errors:
+                    # Real per-probe failures (e.g. a rate limit on the
+                    # shared free-tier LLM backend when garak's ~150-190s
+                    # scan runs immediately before pyrit's) — surfaced, not
+                    # silently dropped, so a smaller real finding count has
+                    # a real reason attached rather than reading as a clean
+                    # scan that just happened to find less.
+                    logging.getLogger(__name__).warning("%s runner scan had real errors: %s", tool_name, errors)
+                if not findings:
+                    findings = [{"note": "scan returned no findings" + (f" (errors: {errors})" if errors else "")}]
+                elif errors:
+                    findings = findings + [{"note": f"{len(errors)} probe(s) failed with real errors", "errors": "; ".join(errors)[:300]}]
+                scan_df = pd.DataFrame(findings)
+                extra[f"{tool_name}_live_scan"] = scan_df
+                # Same fix as Lakera's (see the guardrail_proxy branch above):
+                # persist beyond this one request and recompute KPIs from it
+                # immediately, so a real garak/pyrit scan's real per-attempt
+                # canary_leaked results actually widen the real sample behind
+                # Red-Team Attack Success Rate below — not just the 3 baseline
+                # direct-call rows in redteam_campaign_results, which is all
+                # that KPI reflected before, no matter how thorough a real
+                # scan you'd just run.
+                state.datasets[f"{tool_name}_live_scan"] = scan_df
+        state.recompute_kpis()
 
     return extra
 
@@ -289,6 +519,15 @@ def run_stage(uc: str, stage_key: str, body: RunStageRequest, user: dict = Depen
     # (plus any live MCP enrichment) instead of all 16 datasets — see
     # AgentManager.run_stage's docstring for why that mattered.
     input_keys = [k for k in [io.get("input_key"), *live_mcp_data.keys()] if k]
+    # Recover's Guardrail Update Loop needs to see the same live consolidated
+    # incident_queue Respond uses (not just its own rollback_events) to
+    # genuinely cross-reference which real open Govern/Identify/Protect/
+    # Detect items still lack a deployed update — see its real prompt
+    # instructions in agent_manager.py. Added here rather than as its
+    # official input_key so the UI's "Target Ingested Dataset" panel still
+    # shows the Rollback Event Log as the primary displayed input.
+    if uc == "recover" and stage_key == "guardrail_update" and "incident_queue" not in input_keys:
+        input_keys.append("incident_queue")
 
     outcome = state.agent_manager.run_stage(
         uc, stage_key, datasets_for_run, body.data_source,
@@ -306,6 +545,13 @@ def run_stage(uc: str, stage_key: str, body: RunStageRequest, user: dict = Depen
     hitl_required = gm.check_hitl_required(
         uc, stage_key, outcome.get("findings", []), outcome.get("ai_confidence")
     )
+    # Same real decision path as check_hitl_required above, returned as a
+    # structured "Policy → Decision → Control → Evidence" trace instead of
+    # just the bare bool — the reviewer's ask that this app's existing
+    # V5_THRESHOLDS gate logic be surfaced, not hidden (Milestone 6).
+    decision_trace = gm.explain_hitl_decision(
+        uc, stage_key, outcome.get("findings", []), outcome.get("ai_confidence")
+    )
     ui_config = STAGE_UI_CONFIG.get(uc, {}).get(stage_key, {})
     candidates = hitl_candidates(state.datasets, ui_config.get("hitl")) if hitl_required else []
 
@@ -317,6 +563,7 @@ def run_stage(uc: str, stage_key: str, body: RunStageRequest, user: dict = Depen
         "outcome": outcome,
         "hitl_required": hitl_required,
         "hitl_candidates": candidates,
+        "policy_decision_trace": decision_trace,
         "completed_stages": state.completed_stages[uc],
         "output_preview": {
             "name": io.get("output_name", ""),
@@ -327,6 +574,423 @@ def run_stage(uc: str, stage_key: str, body: RunStageRequest, user: dict = Depen
         "chart": chart,
         "live_mcp_used": list(live_mcp_data.keys()),
     }
+
+
+# Real Respond/Recover actions a Slack approval can trigger — deliberately
+# limited to actions against our own demo target agent, never anything that
+# touches repo collaborator access (see AGENTS.md's explicit safety note on
+# why github_revoke_collaborator is never wired to auto-execute here).
+_REAL_ACTION_EXECUTORS = {
+    "suspend_target_agent": lambda: state.mcp_client.target_agent_set_disabled(True),
+    "restore_target_agent": lambda: state.mcp_client.target_agent_set_disabled(False),
+}
+
+
+class RequestApprovalRequest(BaseModel):
+    action_type: str  # one of _REAL_ACTION_EXECUTORS's keys
+    summary: str
+
+
+@app.post("/api/phases/{uc}/stages/{stage_key}/request-approval")
+def request_approval(uc: str, stage_key: str, body: RequestApprovalRequest, user: dict = Depends(get_current_user)) -> Dict[str, Any]:
+    """Posts a real Slack approval request for a real Respond/Recover action
+    and registers it as pending — the actual action fires from
+    slack_interactions() below once a human clicks Approve in Slack, not
+    from this call. This route only exists to kick off that real round trip."""
+    if uc not in PHASE_KEYS:
+        raise HTTPException(status_code=404, detail="Unknown phase")
+    if body.action_type not in _REAL_ACTION_EXECUTORS:
+        raise HTTPException(status_code=400, detail=f"Unknown action_type '{body.action_type}'. Valid: {list(_REAL_ACTION_EXECUTORS)}")
+
+    action_id = uuid.uuid4().hex[:12]
+    slack_result = state.mcp_client.slack_post_approval_request(body.summary, action_id)
+    state.pending_actions[action_id] = {
+        "uc": uc,
+        "stage_key": stage_key,
+        "action_type": body.action_type,
+        "summary": body.summary,
+        "requested_by": user["u"],
+        "requested_at": time.time(),
+    }
+    AuditLogger().log_action(
+        action=f"Real Action Requested (awaiting Slack approval): {body.action_type}",
+        username=user["u"],
+        status="Pending",
+        target=action_id,
+        details=f"{body.summary} — real Slack approval message posted to channel {slack_result.get('channel')}.",
+    )
+    return {"action_id": action_id, "slack": slack_result}
+
+
+@app.post("/api/recover/replay-detect")
+def replay_detect(user: dict = Depends(get_current_user)) -> Dict[str, Any]:
+    """Recover's live proof: re-sends the same real injection payload used
+    in Detect (app/data/live_engine.py's REAL_INJECTION_PAYLOADS[0]) to the
+    real deployed target agent right now, and checks the real reply for the
+    real canary. Reprovable on demand — not a stored screenshot."""
+    from app.data.live_engine import REAL_INJECTION_PAYLOADS, _canary_leaked
+
+    payload = REAL_INJECTION_PAYLOADS[0]
+    try:
+        result = state.mcp_client.target_agent_chat(payload["payload"], provider="groq")
+    except MCPClient.LiveConnectorError as exc:
+        raise HTTPException(status_code=502, detail=f"Couldn't reach the real target agent: {exc}")
+
+    reply = result.get("reply") or ""
+    leaked = _canary_leaked(reply)
+    model_leaked_raw = bool(result.get("model_leaked_raw", leaked))
+    AuditLogger().log_action(
+        action="Recover Replay — Live",
+        username=user["u"],
+        status="Leaked" if leaked else "Blocked",
+        target="meridian-support-agent",
+        details=f"Real replay of '{payload['category']}' against the live target agent. {'Canary leaked.' if leaked else 'No leak — real fix held.'}",
+    )
+    return {"prompt": payload["payload"], "category": payload["category"], "response": reply, "leaked": leaked, "model_leaked_raw": model_leaked_raw}
+
+
+_HISTORICAL_LEAK_EVIDENCE_PATH = PROJECT_ROOT / "data" / "historical_leak_evidence.json"
+
+
+@app.get("/api/recover/historical-leak-evidence")
+def get_historical_leak_evidence(user: dict = Depends(get_current_user)) -> Dict[str, Any]:
+    """The real, durably-captured pre-fix leak evidence (see the capture
+    endpoint below) — or {"captured": false} if it's never been captured on
+    this deployment. Read-only; never triggers a real capture itself."""
+    if not _HISTORICAL_LEAK_EVIDENCE_PATH.exists():
+        return {"captured": False}
+    return {"captured": True, **json.loads(_HISTORICAL_LEAK_EVIDENCE_PATH.read_text(encoding="utf-8"))}
+
+
+@app.post("/api/recover/capture-historical-leak")
+def capture_historical_leak(user: dict = Depends(get_current_user)) -> Dict[str, Any]:
+    """One-time, deliberate reproduction of the real pre-fix leak, to
+    permanently capture durable 'before' evidence for Recover — see
+    AGENTS.md's live-demo notes for why this exists (no exact historical
+    leak transcript was ever preserved otherwise) and the explicit user
+    approval this required, given it briefly weakens a real live guardrail.
+
+    Real, in order: disables meridian-support-agent's real output guardrail
+    → sends a real jailbreak payload → captures whatever real reply comes
+    back → ALWAYS re-enables the guardrail (try/finally — runs even if the
+    chat call itself fails) → persists the real result to
+    data/historical_leak_evidence.json so this never needs to run again.
+
+    If the real attempt doesn't leak this time (model behaviour isn't
+    perfectly deterministic), any previously-captured real evidence is left
+    untouched rather than being overwritten with a non-leak — this endpoint
+    only ever records a real confirmed leak, never a negative result."""
+    from datetime import datetime, timezone
+    from app.data.live_engine import REAL_INJECTION_PAYLOADS, _canary_leaked
+
+    payload = REAL_INJECTION_PAYLOADS[0]
+
+    state.mcp_client.target_agent_set_guardrail_enabled(False)
+    try:
+        result = state.mcp_client.target_agent_chat(payload["payload"], provider="groq")
+    except MCPClient.LiveConnectorError as exc:
+        raise HTTPException(status_code=502, detail=f"Couldn't reach the real target agent: {exc}")
+    finally:
+        state.mcp_client.target_agent_set_guardrail_enabled(True)
+
+    reply = result.get("reply") or ""
+    leaked = _canary_leaked(reply)
+
+    AuditLogger().log_action(
+        action="Historical Leak Evidence Capture Attempt — Real",
+        username=user["u"],
+        status="Leaked" if leaked else "No Leak",
+        target="meridian-support-agent",
+        details=(
+            f"Real guardrail toggle off → real '{payload['category']}' payload → real reply captured → "
+            f"guardrail restored. {'Real leak confirmed and persisted.' if leaked else 'No leak this attempt — not persisted; existing evidence (if any) left unchanged.'}"
+        ),
+    )
+
+    if not leaked:
+        return {"captured": False, "leaked": False, "response": reply, "note": "No leak this attempt — real model behaviour isn't perfectly deterministic. Try again, or check existing evidence via GET."}
+
+    evidence = {
+        "captured_at": datetime.now(timezone.utc).isoformat(),
+        "captured_by": user["u"],
+        "prompt": payload["payload"],
+        "category": payload["category"],
+        "response": reply,
+        "leaked": True,
+        "note": "Real leak reproduced via a deliberate, brief, admin-authenticated guardrail toggle — the real output-side fix (meridian-support-agent commit 2b89c37) was restored immediately after this one real capture.",
+    }
+    _HISTORICAL_LEAK_EVIDENCE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _HISTORICAL_LEAK_EVIDENCE_PATH.write_text(json.dumps(evidence, indent=2), encoding="utf-8")
+    return {"captured": True, **evidence}
+
+
+class LiveVulnerabilityDemoRequest(BaseModel):
+    prompt_id: str = "PROMPT-001"  # one of REAL_INJECTION_PAYLOADS
+    provider: str = "groq"
+
+
+@app.post("/api/detect/live-vulnerability-demo")
+def detect_live_vulnerability_demo(body: LiveVulnerabilityDemoRequest, user: dict = Depends(get_current_user)) -> Dict[str, Any]:
+    """The repeatable, on-demand counterpart to capture-historical-leak
+    above — same real mechanism (briefly disable the real output guardrail,
+    send a real payload, ALWAYS restore the guardrail via try/finally), but
+    triggerable any time from Detect instead of a one-time historical
+    capture. Exists because a deterministic exact-string guardrail is hard
+    to beat with clever prompting alone (verified this session: neither
+    character-spacing nor reversal produced a genuine bypass — allam-2-7b
+    isn't reliable enough at exact character transforms to smuggle the real
+    key past an exact-match check, and kept blurting the literal key
+    alongside its attempt). Rather than chase an unreliable prompt-injection
+    bypass, this shows the real, honest alternative fact directly: if this
+    guardrail weren't there, the jailbreak the app already proves works
+    (model_leaked_raw) would produce a real visible leak right now. Recover's
+    replay-detect endpoint is the deliberate counterpart — same real payload,
+    guardrail back to its normal on state, proving the fix holds."""
+    from app.data.live_engine import REAL_INJECTION_PAYLOADS, _canary_leaked
+
+    payload = next((p for p in REAL_INJECTION_PAYLOADS if p["prompt_id"] == body.prompt_id), REAL_INJECTION_PAYLOADS[0])
+
+    state.mcp_client.target_agent_set_guardrail_enabled(False)
+    try:
+        result = state.mcp_client.target_agent_chat(payload["payload"], provider=body.provider)
+    except MCPClient.LiveConnectorError as exc:
+        raise HTTPException(status_code=502, detail=f"Couldn't reach the real target agent: {exc}")
+    finally:
+        restore = state.mcp_client.target_agent_set_guardrail_enabled(True)
+
+    reply = result.get("reply") or ""
+    leaked = _canary_leaked(reply)
+
+    AuditLogger().log_action(
+        action="Live Vulnerability Demo — Detect Panel",
+        username=user["u"],
+        status="Leaked" if leaked else "No Leak",
+        target="meridian-support-agent",
+        details=(
+            f"Real guardrail toggle off → real '{payload['category']}' payload → real reply captured → "
+            f"guardrail restored (guardrail_enabled={restore.get('guardrail_enabled')}). "
+            f"{'Real leak confirmed.' if leaked else 'No leak this attempt — real model behaviour is not perfectly deterministic.'}"
+        ),
+    )
+
+    return {
+        "prompt": payload["payload"],
+        "category": payload["category"],
+        "response": reply,
+        "leaked": leaked,
+        "guardrail_restored": bool(restore.get("guardrail_enabled")),
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Dashboard — live AI security tools panel (Lakera Guard interactive test)
+# ═══════════════════════════════════════════════════════════════════════════
+
+# One added real benign prompt, kept separate from
+# app.data.live_engine.REAL_INJECTION_PAYLOADS (which Detect's real
+# adversarial_prompt_corpus iterates unconditionally) — adding it there
+# would silently grow Detect's real corpus row count and campaign results
+# with a non-attack row. This picker needs a "clear verdict" example too, so
+# it's defined here instead, alongside (not inside) that shared list.
+_BENIGN_TEST_PROMPT = {"prompt_id": "PROMPT-BENIGN", "category": "Benign Baseline", "payload": "Hi, can you tell me your name and what you help with?"}
+
+
+@app.get("/api/security-tools/test-prompts")
+def security_tools_test_prompts(user: dict = Depends(get_current_user)) -> Dict[str, Any]:
+    """The real, curated prompt picker for the Dashboard's live Lakera Guard
+    panel — the same 3 real injection payloads Detect actually sends to the
+    live target agent, plus one real benign baseline for contrast."""
+    from app.data.live_engine import REAL_INJECTION_PAYLOADS
+
+    return {"prompts": REAL_INJECTION_PAYLOADS + [_BENIGN_TEST_PROMPT]}
+
+
+class LakeraScreenRequest(BaseModel):
+    prompt: str
+
+
+@app.post("/api/security-tools/lakera-screen")
+def lakera_screen(body: LakeraScreenRequest, user: dict = Depends(get_current_user)) -> Dict[str, Any]:
+    """Real, synchronous Lakera Guard screening of one prompt — the
+    interactive counterpart to Protect's Guardrail Proxy stage (which
+    screens a fixed batch). Returns MCPClient.screen_prompt's real result
+    as-is: {live, flagged, raw} — raw carries Lakera's own real response
+    fields (action, metadata.request_uuid) so the UI can show something a
+    skeptical viewer can point to as proof, not just a flagged/clear label."""
+    prompt = body.prompt.strip()
+    if not prompt:
+        raise HTTPException(status_code=400, detail="prompt must not be empty")
+    result = state.mcp_client.screen_prompt(prompt)
+    if result.get("live"):
+        AuditLogger().log_action(
+            action="Lakera Guard Live Test — Dashboard Panel",
+            username=user["u"],
+            status="Flagged" if result.get("flagged") else "Clear",
+            target="lakera_guard",
+            details=f"Real Lakera Guard screen of a user-selected prompt: {'flagged' if result.get('flagged') else 'clear'}.",
+        )
+    return {"prompt": prompt, **result}
+
+
+class GuardrailProxyChatRequest(BaseModel):
+    prompt: str
+    provider: str = "groq"
+
+
+@app.post("/api/protect/guardrail-proxy/chat")
+def guardrail_proxy_chat(body: GuardrailProxyChatRequest, user: dict = Depends(get_current_user)) -> Dict[str, Any]:
+    """Real guardrail middleware — not a batch test against 4 fixed prompts,
+    an actual proxy any prompt can be sent through. Deliberately free-text:
+    a script replayed against the same known-flagged payloads would always
+    produce the same result and prove nothing new each run.
+
+    Real, in order: Lakera Guard screens the real input first. If flagged,
+    the real target agent is never even called — a genuine block, not a
+    simulated one — and a real row is appended to guardrail_events. If
+    clear, the real prompt is forwarded to the real target agent, and its
+    real reply is *also* screened (a second, independent real layer on top
+    of whatever the target agent's own output check already did — see
+    meridian-support-agent commit 2b89c37). Either way a real event is
+    logged, so guardrail_events actually grows now instead of staying
+    permanently empty (Section 43's documented honest gap — this is what
+    finally closes it for real, not a workaround)."""
+    from datetime import datetime, timezone
+    from app.data.live_engine import _AGENT_ID
+
+    prompt = body.prompt.strip()
+    if not prompt:
+        raise HTTPException(status_code=400, detail="prompt must not be empty")
+
+    def _log_event(event_type: str, action_taken: str) -> Dict[str, Any]:
+        event = {
+            "event_id": f"GPE-{uuid.uuid4().hex[:8]}",
+            "agent_id": _AGENT_ID,
+            "event_type": event_type,
+            "action_taken": action_taken,
+            "input_snippet_redacted": prompt[:120],
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        existing = state.datasets.get("guardrail_events")
+        rows = existing.to_dict("records") if existing is not None and not existing.empty else []
+        rows.append(event)
+        state.datasets["guardrail_events"] = pd.DataFrame(rows)
+        state.recompute_kpis()
+        return event
+
+    input_screen = state.mcp_client.screen_prompt(prompt)
+    if input_screen.get("flagged"):
+        event = _log_event("prompt_injection_or_jailbreak", "Blocked")
+        AuditLogger().log_action(
+            action="Real Guardrail Proxy — Input Blocked",
+            username=user["u"], status="Blocked", target="meridian-support-agent",
+            details="Real Lakera Guard flagged this real prompt on input — never forwarded to the real target agent.",
+        )
+        return {"blocked": True, "blocked_at": "input", "lakera_input": input_screen, "reply": None, "event": event}
+
+    try:
+        result = state.mcp_client.target_agent_chat(prompt, provider=body.provider)
+    except MCPClient.LiveConnectorError as exc:
+        raise HTTPException(status_code=502, detail=f"Couldn't reach the real target agent: {exc}")
+    reply = result.get("reply") or ""
+    model_leaked_raw = bool(result.get("model_leaked_raw", False))
+
+    output_screen = state.mcp_client.screen_prompt(reply) if reply else {"live": input_screen.get("live"), "flagged": False}
+    if output_screen.get("flagged"):
+        event = _log_event("sensitive_output", "Redacted")
+        AuditLogger().log_action(
+            action="Real Guardrail Proxy — Output Blocked",
+            username=user["u"], status="Redacted", target="meridian-support-agent",
+            details="Real Lakera Guard flagged the real target agent's real reply — withheld from the caller.",
+        )
+        return {"blocked": True, "blocked_at": "output", "lakera_input": input_screen, "lakera_output": output_screen, "reply": "[REDACTED BY GUARDRAIL PROXY]", "event": event, "model_leaked_raw": model_leaked_raw}
+
+    event = _log_event("clean", "Allowed")
+    AuditLogger().log_action(
+        action="Real Guardrail Proxy — Allowed",
+        username=user["u"], status="Allowed", target="meridian-support-agent",
+        details="Real prompt passed both real input and output Lakera screens; real reply returned to caller.",
+    )
+    return {"blocked": False, "lakera_input": input_screen, "lakera_output": output_screen, "reply": reply, "event": event, "model_leaked_raw": model_leaked_raw}
+
+
+def _categorize_scan_finding(row: Dict[str, Any]) -> str:
+    """Honest, derived-not-invented label for a real garak/pyrit finding row:
+    did the real target agent's own output guardrail (2b89c37) intervene, or
+    did the model refuse the jailbreak on its own before the guardrail was
+    ever needed? Read straight off the real response text already returned
+    by the runner — no new data, just naming what already happened."""
+    text = str(row.get("response_snippet") or "")
+    if "RESPONSE BLOCKED" in text:
+        return "guardrail_blocked"
+    if row.get("canary_leaked"):
+        return "leaked"
+    return "model_self_refused"
+
+
+class LiveScanRequest(BaseModel):
+    tools: List[str]  # subset of ["garak", "pyrit"]
+
+
+@app.post("/api/detect/live-scan")
+def detect_live_scan(body: LiveScanRequest, user: dict = Depends(get_current_user)) -> Dict[str, Any]:
+    """Real, on-demand Garak/PyRIT scan(s) — the same real
+    MCPClient.trigger_runner_scan already used by the Detect stage's
+    "+ External Source" data-source path, just triggered directly and made
+    prominent instead of buried behind a generic radio + Execute combo.
+    Genuinely slow (each real tool runs dozens of real LLM calls, ~150-190s)
+    — the frontend shows a real elapsed-time state while this blocks, not a
+    fake instant result. Every real finding gets a real, derived category
+    (guardrail_blocked / model_self_refused / leaked) so the guardrail's
+    actual role in the outcome is visible, not just a bare pass/fail."""
+    tools = [t for t in body.tools if t in ("garak", "pyrit")]
+    if not tools:
+        raise HTTPException(status_code=400, detail="tools must include at least one of: garak, pyrit")
+
+    target_agent_url = os.getenv("TARGET_AGENT_URL", "").rstrip("/")
+    scan_target = f"{target_agent_url}/chat" if target_agent_url else "demo-agent-fleet"
+
+    results: Dict[str, Any] = {}
+    for tool_name in tools:
+        status = state.mcp_client.get_connection_status(tool_name)
+        if not status["live"]:
+            results[tool_name] = {"live": False, "rows": [], "summary": None, "error": f"{tool_name} is not configured (missing runner URL)."}
+            continue
+
+        scan_result = state.mcp_client.trigger_runner_scan(tool_name, target=scan_target, target_label="Meridian Financial Support Agent")
+        findings = [f for f in (scan_result.get("findings") or []) if "probe" in f]
+        errors = scan_result.get("errors")
+
+        rows = []
+        for f in findings:
+            row = dict(f)
+            row["outcome"] = _categorize_scan_finding(row)
+            rows.append(row)
+
+        if findings:
+            state.datasets[f"{tool_name}_live_scan"] = pd.DataFrame(findings)
+
+        summary = {
+            "total": len(rows),
+            "guardrail_blocked": sum(1 for r in rows if r["outcome"] == "guardrail_blocked"),
+            "model_self_refused": sum(1 for r in rows if r["outcome"] == "model_self_refused"),
+            "leaked": sum(1 for r in rows if r["outcome"] == "leaked"),
+        }
+        results[tool_name] = {"live": True, "rows": rows, "summary": summary, "errors": errors}
+
+        leaked_note = f", {summary['leaked']} leaked" if summary["leaked"] else ""
+        AuditLogger().log_action(
+            action=f"Live {tool_name.title()} Scan — Detect Panel",
+            username=user["u"],
+            status="Success" if rows else "No findings",
+            target="meridian-support-agent",
+            details=(
+                f"Real {tool_name} scan: {summary['total']} real attempts — "
+                f"{summary['guardrail_blocked']} guardrail-blocked, {summary['model_self_refused']} model-self-refused{leaked_note}."
+            ),
+        )
+
+    state.recompute_kpis()
+    return {"results": results}
 
 
 class HitlDecisionRequest(BaseModel):
@@ -357,6 +1021,127 @@ class DispatchTicketsRequest(BaseModel):
     summary: str
     description: str = ""
     priority: str = "Medium"
+
+
+def _verify_slack_signature(raw_body: bytes, timestamp: str, signature: str) -> bool:
+    """Real HMAC-SHA256 verification per Slack's own spec — confirms a
+    callback genuinely came from Slack (not a forged POST to our endpoint)
+    and isn't a replayed old request. https://api.slack.com/authentication/verifying-requests-from-slack"""
+    signing_secret = os.getenv("SLACK_SIGNING_SECRET", "")
+    if not signing_secret:
+        return False
+    try:
+        if abs(time.time() - int(timestamp)) > 60 * 5:
+            return False  # older than 5 minutes — reject as a possible replay
+    except (TypeError, ValueError):
+        return False
+    basestring = f"v0:{timestamp}:{raw_body.decode('utf-8')}".encode("utf-8")
+    computed = "v0=" + hmac.new(signing_secret.encode("utf-8"), basestring, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(computed, signature or "")
+
+
+@app.post("/api/slack/interactions")
+async def slack_interactions(request: Request) -> Dict[str, Any]:
+    """Real callback target for the Approve/Reject buttons posted by
+    MCPClient.slack_post_approval_request(). Slack calls this directly —
+    see the Slack App's Interactivity Request URL setup.
+
+    On approve, looks up the pending real action registered by
+    request_approval() above (keyed by action_id) and actually executes it —
+    e.g. a real target_agent_set_disabled() call — not just records the
+    click. On reject, or if the action_id isn't pending (already handled, or
+    the backend restarted since it was requested), no real action fires;
+    the click is still recorded either way."""
+    raw_body = await request.body()
+    if not _verify_slack_signature(
+        raw_body,
+        request.headers.get("x-slack-request-timestamp", ""),
+        request.headers.get("x-slack-signature", ""),
+    ):
+        raise HTTPException(status_code=401, detail="Invalid Slack request signature.")
+
+    form = dict(pair.split("=", 1) for pair in raw_body.decode("utf-8").split("&") if "=" in pair)
+    from urllib.parse import unquote_plus
+    payload = json.loads(unquote_plus(form.get("payload", "{}")))
+
+    action = (payload.get("actions") or [{}])[0]
+    decision = action.get("action_id", "unknown")  # "approve" or "reject"
+    action_id = action.get("value", "")
+    approver = payload.get("user", {}).get("username", "unknown")
+    response_url = payload.get("response_url")
+
+    AuditLogger().log_action(
+        action="Slack Approval Decision — Live",
+        username=approver,
+        status="Approved" if decision == "approve" else "Rejected",
+        target=action_id,
+        details=f"Real Slack interaction: {approver} clicked {decision} for action_id={action_id}.",
+    )
+
+    pending = state.pending_actions.pop(action_id, None)
+    execution_result: Optional[Dict[str, Any]] = None
+    if pending is None:
+        status_note = "No pending real action found for this action_id (already handled, or the backend restarted since it was requested)."
+    elif decision != "approve":
+        status_note = f"Rejected by @{approver} — real action '{pending['action_type']}' was NOT executed."
+    else:
+        executor = _REAL_ACTION_EXECUTORS.get(pending["action_type"])
+        if executor is None:
+            status_note = f"No executor wired for action_type '{pending['action_type']}'."
+        else:
+            try:
+                execution_result = executor()
+                status_note = f"Real action '{pending['action_type']}' executed successfully."
+                AuditLogger().log_action(
+                    action=f"Real Action Executed (Slack-approved): {pending['action_type']}",
+                    username=approver,
+                    status="Success",
+                    target=action_id,
+                    details=f"{pending['summary']} — approved by @{approver} in Slack, real action executed.",
+                )
+            except MCPClient.LiveConnectorError as exc:
+                status_note = f"Real action '{pending['action_type']}' FAILED: {exc}"
+                AuditLogger().log_action(
+                    action=f"Real Action FAILED: {pending['action_type']}",
+                    username=approver,
+                    status="Failed",
+                    target=action_id,
+                    details=str(exc),
+                )
+
+    # Acknowledge back to the same Slack message for real, immediate feedback
+    if response_url:
+        label = "✅ Approved" if decision == "approve" else "❌ Rejected"
+        try:
+            httpx.post(response_url, json={
+                "replace_original": True,
+                "text": f"{label} by @{approver} — {status_note}",
+            }, timeout=10.0)
+        except httpx.HTTPError:
+            pass  # best-effort UI update in Slack; the real decision is already audit-logged above
+
+    state.resolved_actions[action_id] = {
+        "decision": decision,
+        "approver": approver,
+        "status_note": status_note,
+        "execution_result": execution_result,
+    }
+
+    return {"ok": True, "decision": decision, "action_id": action_id, "approver": approver, "status_note": status_note, "execution_result": execution_result}
+
+
+@app.get("/api/approval-status/{action_id}")
+def approval_status(action_id: str, user: dict = Depends(get_current_user)) -> Dict[str, Any]:
+    """Polled by SlackApprovalCard once a real approval request is posted —
+    tells the app's own UI what a real human actually clicked in Slack,
+    instead of leaving the card saying 'waiting' forever after it's already
+    been resolved. Returns resolved: false while state.pending_actions still
+    holds the action_id (or it's unknown — e.g. a stale action_id from before
+    a backend restart)."""
+    resolved = state.resolved_actions.get(action_id)
+    if resolved is None:
+        return {"resolved": False}
+    return {"resolved": True, **resolved}
 
 
 @app.post("/api/phases/{uc}/stages/{stage_key}/dispatch-tickets")
@@ -391,15 +1176,23 @@ def dispatch_tickets(uc: str, stage_key: str, body: DispatchTicketsRequest, user
 
 @app.get("/api/datasets")
 def list_datasets(user: dict = Depends(get_current_user)) -> Dict[str, Any]:
+    """Every dataset here is real (LiveDataEngine, Milestone 3) or honestly
+    empty pending a real fetcher/action — never synthetic. `is_live` just
+    reflects whether real rows currently exist for this dataset, so the
+    frontend can present this page as an evidence store: populated =
+    real evidence on record, empty = no real evidence yet, not "missing
+    data" or a placeholder."""
     result = {}
     for uc, names in PHASE_DATASETS.items():
         result[uc] = []
         for name in names:
             df = state.datasets.get(name)
+            row_count = 0 if df is None else len(df)
             result[uc].append({
                 "name": name,
-                "row_count": 0 if df is None else len(df),
+                "row_count": row_count,
                 "column_count": 0 if df is None else len(df.columns),
+                "is_live": row_count > 0,
             })
     return result
 
@@ -493,6 +1286,8 @@ class SettingsRequest(BaseModel):
     reasoning_model: Optional[str] = None     # Tier 3 — Reasoning (gpt-4o is clamped to gpt-4o-mini regardless — see app/llm/router.py)
     ollama_model: Optional[str] = None        # Tier 2 — Secondary (local)
     ollama_base_url: Optional[str] = None
+    github_target_repo: Optional[str] = None  # "owner/name" — retargets the whole live pipeline
+    github_token: Optional[str] = None        # fine-grained PAT scoped to that repo
 
 
 def _mask(value: str) -> str:
@@ -503,6 +1298,22 @@ def _mask(value: str) -> str:
 
 @app.get("/api/settings")
 def get_settings(user: dict = Depends(get_current_user)) -> Dict[str, Any]:
+    # Real reachability, not just "is a URL configured" — a cheap real
+    # GET /healthz against the actual target agent process (same call
+    # AppState._ensure_target_agent_enabled() makes at startup). Every other
+    # live-systems chip on the Dashboard reflects a real connection check;
+    # this one was the one exception, silently reporting "connected" the
+    # instant a URL string existed even if the process behind it was dead.
+    target_agent_reachable = False
+    target_agent_disabled = False
+    if os.getenv("TARGET_AGENT_URL"):
+        try:
+            health = state.mcp_client.target_agent_healthz()
+            target_agent_reachable = True
+            target_agent_disabled = bool(health.get("disabled"))
+        except Exception:
+            target_agent_reachable = False
+
     return {
         "openai_api_key_masked": _mask(os.getenv("OPENAI_API_KEY", "")),
         "openai_api_key_set": bool(os.getenv("OPENAI_API_KEY")),
@@ -518,6 +1329,16 @@ def get_settings(user: dict = Depends(get_current_user)) -> Dict[str, Any]:
             {"name": name, "required_env_vars": tool.required_env_vars}
             for name, tool in state.mcp_registry.tools.items()
         ],
+        # Real live target this whole pipeline currently analyses — editable
+        # from the Settings page (Reload live data). Only works for repos
+        # the configured GITHUB_TOKEN can actually access; a different real
+        # repo needs a matching token too. target_agent_url stays read-only
+        # here since it isn't part of this retargeting flow.
+        "github_target_repo": os.getenv("GITHUB_TARGET_REPO", ""),
+        "github_token_set": bool(os.getenv("GITHUB_TOKEN")),
+        "target_agent_url": os.getenv("TARGET_AGENT_URL", ""),
+        "target_agent_reachable": target_agent_reachable,
+        "target_agent_disabled": target_agent_disabled,
     }
 
 
@@ -543,9 +1364,19 @@ def save_settings(body: SettingsRequest, user: dict = Depends(get_current_user))
     if body.ollama_base_url:
         updates["OLLAMA_BASE_URL"] = body.ollama_base_url
 
+    retarget = False
+    if body.github_target_repo and body.github_target_repo != os.getenv("GITHUB_TARGET_REPO", ""):
+        updates["GITHUB_TARGET_REPO"] = body.github_target_repo
+        retarget = True
+    if body.github_token:
+        updates["GITHUB_TOKEN"] = body.github_token
+        retarget = True
+
     _apply_settings(updates)
     state.reload_llm_router()
-    return {"saved": True}
+    if retarget:
+        state.reload_datasets()
+    return {"saved": True, "reloaded": retarget, "fetch_errors": state.fetch_errors if retarget else None}
 
 
 class ChangeCredentialsRequest(BaseModel):

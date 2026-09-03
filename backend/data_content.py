@@ -49,12 +49,19 @@ USE_CASE_OVERVIEW: Dict[str, Dict[str, Any]] = {
         "frameworks": ["NIST CSF 2.0 (Recover)", "NIST AI RMF 1.0 (Manage)"],
         "color": "#14b8a6",
     },
+    "govern": {
+        "title": "🏛️ Govern — Policy Authored Once, Applied Everywhere",
+        "subtitle": "Policy Catalog & Traceability · Real-Time Compliance Evaluation",
+        "goal": "Author policy once as real, versioned code — then apply it everywhere: evaluate every real policy rule's condition against real live findings from Identify, Protect, and Detect, and issue a real compliance decision (Compliant / Blocked / Human Approval Required / Remediation Required) with cited evidence for each.",
+        "frameworks": ["NIST AI RMF 1.0 (Govern)", "NIST CSF 2.0 (Govern)", "ISO/IEC 42001"],
+        "color": "#f5b700",
+    },
 }
 
 USE_CASE_COLOURS = {uc: v["color"] for uc, v in USE_CASE_OVERVIEW.items()}
 USE_CASE_LABELS = {
     "identify": "🔎 Identify", "protect": "🛡️ Protect", "detect": "🚨 Detect",
-    "respond": "🚑 Respond", "recover": "♻️ Recover",
+    "respond": "🚑 Respond", "recover": "♻️ Recover", "govern": "🏛️ Govern",
 }
 
 # ── Per-stage UI configuration: which column drives the category filter,
@@ -165,6 +172,20 @@ STAGE_UI_CONFIG: Dict[str, Dict[str, Dict[str, Any]]] = {
             "hitl": None,
         },
     },
+    "govern": {
+        "policy_catalog": {
+            "filter_column": "enforcement_mode",
+            "filter_options": ["Enforced — Block", "Enforced — Human Approval Required", "Enforced — Remediation SLA"],
+            "chart": {"dataset": "guardrail_policies", "column": "enforcement_mode", "type": "bar", "title": "Policy Enforcement Modes"},
+            "hitl": None,
+        },
+        "compliance_evaluation": {
+            "filter_column": "severity",
+            "filter_options": ["critical", "high", "medium", "low"],
+            "chart": {"dataset": "governance_compliance_evaluation", "column": "decision", "type": "donut", "title": "Compliance Decisions"},
+            "hitl": {"dataset": "governance_compliance_evaluation", "id_column": "rule_id", "label_template": "{rule_id} — {rule_name} ({decision})", "match_column": "triggered", "match_value": True},
+        },
+    },
 }
 
 # ── Which datasets belong to which phase, for the Data Explorer page ──
@@ -175,6 +196,7 @@ PHASE_DATASETS: Dict[str, list] = {
     "detect": ["adversarial_prompt_corpus", "agent_behavior_telemetry", "redteam_campaign_results"],
     "respond": ["incident_queue", "containment_actions", "soar_playbooks"],
     "recover": ["config_snapshots", "rollback_events", "guardrail_update_log"],
+    "govern": ["governance_compliance_evaluation"],
 }
 
 # ── Agents Repository — 14 agents, names matching agent_manager.AGENT_NAME_MAP exactly ──
@@ -291,6 +313,24 @@ AGENTS_DB: Dict[str, Dict[str, Any]] = {
                 "stage": "Guardrail Update Loop",
                 "role": "Feeds red-team and incident findings back into guardrail policy updates and measures the resulting effectiveness delta.",
                 "mitre_ref": "N/A — Closed-Loop Policy Update",
+            },
+        ],
+    },
+    "govern": {
+        "color": "#f5b700",
+        "framework": "NIST AI RMF 1.0 (Govern), NIST CSF 2.0 (Govern), ISO/IEC 42001",
+        "agents": [
+            {
+                "name": "GovernPolicyAgent",
+                "stage": "Policy Catalog & Traceability",
+                "role": "Reviews the real, authored governance policy fetched from the target repo for ownership, versioning, and compliance-framework traceability.",
+                "mitre_ref": "N/A — Policy Governance / Traceability Audit",
+            },
+            {
+                "name": "GovernComplianceAgent",
+                "stage": "Real-Time Compliance Evaluation",
+                "role": "Evaluates each policy rule's real condition against live Identify/Protect/Detect state and reports the resulting compliance decision with cited evidence.",
+                "mitre_ref": "N/A — Continuous Compliance Evaluation",
             },
         ],
     },

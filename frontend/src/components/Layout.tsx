@@ -1,7 +1,8 @@
 import type { ReactNode } from "react";
 import { Navigate } from "react-router-dom";
-import { useAuth } from "../context/AuthContext";
+import { useAuth } from "../context/useAuth";
 import { Sidebar } from "./Sidebar";
+import { StoryBar } from "./StoryBar";
 import { LoadingBlock } from "./ui";
 
 export function Layout({ children }: { children: ReactNode }) {
@@ -13,7 +14,10 @@ export function Layout({ children }: { children: ReactNode }) {
   return (
     <div className="app-shell">
       <Sidebar />
-      <main className="main-content">{children}</main>
+      <main className="main-content">
+        <StoryBar />
+        <div className="main-content-inner">{children}</div>
+      </main>
     </div>
   );
 }

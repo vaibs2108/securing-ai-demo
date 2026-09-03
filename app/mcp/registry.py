@@ -120,3 +120,69 @@ class MCPToolRegistry:
             integration_type="hosted_api",
             docs_url="https://docs.servicenow.com/bundle/latest-release-notes/page/integrate/inbound-rest/concept/c_TableAPI.html",
         )
+
+        # ── Live demo targets (real infra we built and control) ──────────────
+        # Unlike the 5 tools above, these three are live-only — no mock
+        # fallback branch. See AGENTS.md's live-demo notes for why: this is
+        # the real control-plane thread (Govern..Recover) for the
+        # meridian-support-agent demo target, and a fabricated fallback here
+        # would defeat the entire point of that thread being real.
+
+        self.tools["github"] = MCPToolMetadata(
+            name="github",
+            display_name="GitHub",
+            category="AI Security",
+            description="Real GitHub REST API access to the meridian-support-agent target repo: discovery (tree, dependency manifest, policy file), Dependabot/Secret Scanning alerts, Actions workflow runs, branch protection, collaborators, and containment/recovery actions (revoke collaborator, disable/enable workflow, revert commit).",
+            capabilities=["discover_assets", "get_findings", "get_policy", "enforce_control", "quarantine_asset", "roll_back_release", "retrieve_evidence"],
+            endpoints={"api": "https://api.github.com"},
+            required_env_vars=["GITHUB_TOKEN", "GITHUB_TARGET_REPO"],
+            integration_type="hosted_api",
+            docs_url="https://docs.github.com/en/rest",
+        )
+
+        self.tools["target_agent"] = MCPToolMetadata(
+            name="target_agent",
+            display_name="Meridian Support Agent (target)",
+            category="AI Security",
+            description="The real, deployed meridian-support-agent demo target — a live chat call for Detect's adversarial test, and real /admin/disable /admin/enable calls for Respond/Recover.",
+            capabilities=["execute_scan", "quarantine_asset", "roll_back_release"],
+            endpoints={"chat": "/chat", "disable": "/admin/disable", "enable": "/admin/enable"},
+            required_env_vars=["TARGET_AGENT_URL", "TARGET_AGENT_ADMIN_TOKEN"],
+            integration_type="hosted_api",
+            docs_url="https://github.com/vaibs2108/meridian-support-agent",
+        )
+
+        # ── Data pipeline (bring-your-own — no real vendor to point at yet) ───
+        # Unlike every tool above, this isn't a specific named product: it's
+        # an honest, generic slot for whatever real SIEM / log / telemetry
+        # source a user actually has (Splunk, Sentinel, Elastic, an internal
+        # events API — anything with a URL and a key). Same honesty rule as
+        # everywhere else in this registry still applies: it reports Mock
+        # Fallback until real SIEM_API_URL/SIEM_API_KEY are configured, and
+        # MCPClient.external_source_fetch_events() makes a real HTTP call
+        # once they are — never a fabricated "connected" result.
+        self.tools["external_source"] = MCPToolMetadata(
+            name="external_source",
+            display_name="External Source (SIEM / API)",
+            category="Data Pipeline",
+            description="Bring your own SIEM, log platform, or security events API. Connect it here once you have "
+                         "one and its real events enrich whichever stage's Data Source Provider you select "
+                         "\"+ External Source\" on — not a specific vendor, a generic real connector slot.",
+            capabilities=["get_findings"],
+            endpoints={"events": "<your configured SIEM_API_URL>"},
+            required_env_vars=["SIEM_API_URL", "SIEM_API_KEY"],
+            integration_type="hosted_api",
+            docs_url="",
+        )
+
+        self.tools["slack"] = MCPToolMetadata(
+            name="slack",
+            display_name="Slack",
+            category="Remediation",
+            description="Real Slack Bot posting an interactive Approve/Reject message for Respond's human-approval mode; a real person's click calls back to POST /api/slack/interactions.",
+            capabilities=["require_approval"],
+            endpoints={"post_message": "/chat.postMessage"},
+            required_env_vars=["SLACK_BOT_TOKEN", "SLACK_SIGNING_SECRET", "SLACK_CHANNEL_ID"],
+            integration_type="hosted_api",
+            docs_url="https://api.slack.com/apps",
+        )

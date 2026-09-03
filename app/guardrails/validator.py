@@ -11,6 +11,7 @@ No raw, unvalidated LLM output is ever shown to the user.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -562,6 +563,109 @@ class GuardrailManager:
                 return True
 
         return False
+
+    def explain_hitl_decision(
+        self,
+        use_case: str,
+        stage: str,
+        findings: Optional[List[Any]] = None,
+        ai_confidence: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Same real decision path as check_hitl_required, returned as a
+        structured trace instead of a bare bool — the "Policy → Decision →
+        Control → Evidence" strip the UI renders is built directly from
+        this, not a separate parallel explanation. Mirrors
+        check_hitl_required's logic rather than refactoring it, so the
+        tested boolean-gate behaviour stays untouched by this read-only
+        addition."""
+        stage_mappings = {
+            ("identify", "risk_scoring"): "identify_stage3",
+            ("protect", "secrets_isolation"): "protect_stage3",
+            ("protect", "policy_as_code"): "protect_stage3",
+            ("detect", "red_teaming"): "detect_stage3",
+            ("respond", "containment"): "respond_stage1",
+            ("recover", "rollback"): "recover_stage1",
+        }
+        matched_threshold_key = stage_mappings.get((use_case.lower(), stage.lower()), f"{use_case.lower()}_{stage.lower()}")
+
+        V5_THRESHOLDS = {
+            "identify_stage3": {"condition": "blast_radius == Critical", "confidence_floor": 85},
+            "protect_stage3": {"condition": "isolation_status == Exposed AND exposed_to_llm", "confidence_floor": 85},
+            "detect_stage3": {"condition": "outcome == Success AND severity == Critical", "confidence_floor": 80},
+            "respond_stage1": {"condition": "severity == Critical", "confidence_floor": 85},
+            "recover_stage1": {"condition": "reason is Critical-sourced", "confidence_floor": 85},
+        }
+
+        trace: Dict[str, Any] = {
+            "policy": None,
+            "control": None,
+            "evidence": None,
+            "decision": False,
+            "decision_reason": None,
+        }
+
+        if matched_threshold_key in V5_THRESHOLDS:
+            config = V5_THRESHOLDS[matched_threshold_key]
+            conf_floor = config.get("confidence_floor", 80)
+            trace["policy"] = f"{matched_threshold_key}: {config['condition']}"
+            trace["control"] = f"AI confidence must be ≥ {conf_floor}, and no finding may match the condition above."
+
+            if ai_confidence is not None and ai_confidence < conf_floor:
+                trace["decision"] = True
+                trace["decision_reason"] = f"AI confidence {ai_confidence} is below the required floor of {conf_floor}."
+                trace["evidence"] = f"ai_confidence = {ai_confidence}"
+                return trace
+
+            if findings:
+                for f in findings:
+                    if not isinstance(f, dict):
+                        continue
+                    hit = False
+                    if matched_threshold_key == "identify_stage3":
+                        hit = str(f.get("blast_radius", f.get("severity", ""))).upper() == "CRITICAL"
+                    elif matched_threshold_key == "protect_stage3":
+                        isolation_status = str(f.get("isolation_status", "")).upper()
+                        hit = bool(f.get("exposed_to_llm", False)) or isolation_status == "EXPOSED"
+                    elif matched_threshold_key == "detect_stage3":
+                        hit = str(f.get("outcome", "")).upper() == "SUCCESS" and str(f.get("severity", "")).upper() == "CRITICAL"
+                    elif matched_threshold_key == "respond_stage1":
+                        hit = str(f.get("severity", "")).upper() == "CRITICAL"
+                    elif matched_threshold_key == "recover_stage1":
+                        reason = str(f.get("reason", "")).lower()
+                        hit = "critical" in reason or "red-team" in reason
+                    if hit:
+                        trace["decision"] = True
+                        trace["decision_reason"] = f"Finding \"{f.get('title', f.get('id', 'untitled'))}\" matched the policy condition."
+                        trace["evidence"] = f.get("evidence") or json.dumps({k: v for k, v in f.items() if k in ("blast_radius", "isolation_status", "exposed_to_llm", "outcome", "severity", "reason")}, default=str)
+                        return trace
+
+            trace["decision_reason"] = "No finding matched the condition and AI confidence met the floor — no human approval required."
+            return trace
+
+        # Fallback path — same thresholds check_hitl_required falls back to
+        thresholds = self.get_hitl_thresholds(use_case, stage)
+        trace["policy"] = f"Default gate for {use_case}/{stage} (no V5 threshold defined for this stage)"
+        conf_threshold = thresholds.get("confidence_threshold", 60)
+        max_auto = thresholds.get("max_auto_findings", 100)
+        trace["control"] = f"AI confidence must be ≥ {conf_threshold}; findings count must be ≤ {max_auto}."
+
+        if thresholds.get("require_approval", False):
+            trace["decision"] = True
+            trace["decision_reason"] = "This stage is configured to always require human approval."
+            return trace
+        if ai_confidence is not None and ai_confidence < conf_threshold:
+            trace["decision"] = True
+            trace["decision_reason"] = f"AI confidence {ai_confidence} is below the default threshold of {conf_threshold}."
+            trace["evidence"] = f"ai_confidence = {ai_confidence}"
+            return trace
+        if findings is not None and len(findings) > max_auto:
+            trace["decision"] = True
+            trace["decision_reason"] = f"{len(findings)} findings exceeds the auto-approval limit of {max_auto}."
+            trace["evidence"] = f"findings count = {len(findings)}"
+            return trace
+
+        trace["decision_reason"] = "All default gate conditions passed — no human approval required."
+        return trace
 
     # ------------------------------------------------------------------
     # Layer 4 — Synthetic data watermark check

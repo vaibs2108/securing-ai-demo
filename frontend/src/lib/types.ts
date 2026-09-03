@@ -1,4 +1,4 @@
-export type PhaseKey = "identify" | "protect" | "detect" | "respond" | "recover";
+export type PhaseKey = "identify" | "protect" | "detect" | "respond" | "recover" | "govern";
 
 export interface PhaseOverview {
   title: string;
@@ -107,6 +107,23 @@ export interface AgentOutcome {
   recommendations: string[];
   timestamp: number;
   error?: string;
+  aggregation?: Record<string, { shape?: [number, number]; columns?: string[]; rows?: Record<string, unknown>[] }>;
+}
+
+export interface AttackRow {
+  probe?: string;
+  category?: string;
+  prompt?: string;
+  payload?: string;
+  response_snippet?: string;
+  canary_leaked?: boolean;
+  // Real, safe fact from the target agent itself — did the raw model
+  // completion actually contain the real credential, before its own output
+  // guardrail substituted the blocked message? Distinct from canary_leaked,
+  // which only reflects what the caller received *after* the guardrail ran.
+  model_leaked_raw?: boolean;
+  detected?: boolean;
+  mitre_atlas_ref?: string;
 }
 
 export interface ChartData {
@@ -121,10 +138,44 @@ export interface HitlCandidate {
   label: string;
 }
 
+export interface AssetGraphNode {
+  id: string;
+  type: "agent" | "model" | "identity" | "secret" | "policy";
+  label: string;
+  detail?: string;
+  risk_score?: number | null;
+  blast_radius?: string | null;
+  internet_facing?: boolean;
+  triggered?: boolean | null;
+  decision?: string | null;
+  critical?: boolean;
+}
+
+export interface AssetGraphEdge {
+  from: string;
+  to: string;
+  label: string;
+  critical?: boolean;
+}
+
+export interface AssetGraphData {
+  nodes: AssetGraphNode[];
+  edges: AssetGraphEdge[];
+}
+
+export interface PolicyDecisionTrace {
+  policy: string | null;
+  control: string | null;
+  evidence: string | null;
+  decision: boolean;
+  decision_reason: string | null;
+}
+
 export interface RunStageResponse {
   outcome: AgentOutcome;
   hitl_required: boolean;
   hitl_candidates: HitlCandidate[];
+  policy_decision_trace: PolicyDecisionTrace;
   completed_stages: number[];
   output_preview: {
     name: string;
@@ -149,14 +200,119 @@ export interface DispatchTicketsResponse {
   servicenow: TicketResult;
 }
 
+export interface StoryNode {
+  phase: string;
+  status: "pending" | "clean" | "warning" | "critical" | "resolved";
+  label: string;
+}
+
 export interface DashboardData {
   kpis: Record<string, number>;
   posture_index: number;
   gauges: { phase: string; label: string; score: number; color: string }[];
   operational: { label: string; value: number; color: string }[];
+  storyline: StoryNode[];
   trend: Record<string, { day: string; score: number }[]>;
   blast_radius: Record<string, number>;
   recent_operations: AuditLogEntry[];
+  data_health: Record<string, string>;
+}
+
+export interface TestPrompt {
+  prompt_id: string;
+  category: string;
+  payload: string;
+}
+
+export interface LakeraScreenResult {
+  prompt: string;
+  live: boolean;
+  flagged: boolean | null;
+  raw?: { flagged?: boolean; action?: string; metadata?: { request_uuid?: string }; mock?: boolean; note?: string };
+  error?: string;
+}
+
+export interface GuardrailProxyEvent {
+  event_id: string;
+  agent_id: string;
+  event_type: string;
+  action_taken: string;
+  input_snippet_redacted: string;
+  timestamp: string;
+}
+
+export interface GuardrailProxyChatResult {
+  blocked: boolean;
+  blocked_at?: "input" | "output";
+  lakera_input?: { live: boolean; flagged: boolean | null; raw?: LakeraScreenResult["raw"] };
+  lakera_output?: { live: boolean; flagged: boolean | null; raw?: LakeraScreenResult["raw"] };
+  reply: string | null;
+  event: GuardrailProxyEvent;
+  // Real fact from the target agent itself — did the raw model completion
+  // contain the real credential before any guardrail (this proxy's Lakera
+  // screen, or the target's own output check) touched it? Only set when the
+  // real target agent was actually called (i.e. not set on an input block).
+  model_leaked_raw?: boolean;
+}
+
+export interface ReplayDetectResponse {
+  prompt: string;
+  category: string;
+  response: string;
+  leaked: boolean;
+  // Real fact from the target agent itself — did the raw model completion
+  // contain the real credential before the target's own output guardrail
+  // ran? Distinct from `leaked`, which reflects only what this replay call
+  // actually received back.
+  model_leaked_raw?: boolean;
+}
+
+export interface LiveScanRow {
+  probe?: string;
+  prompt?: string;
+  response_snippet?: string;
+  canary_leaked?: boolean;
+  // Real, derived-not-invented label — see backend/main.py's
+  // _categorize_scan_finding: read straight off the real response text
+  // already returned by the runner, not a separate signal.
+  outcome: "guardrail_blocked" | "model_self_refused" | "leaked";
+  garak_detector_results?: Record<string, unknown>;
+}
+
+export interface LiveScanToolResult {
+  live: boolean;
+  rows: LiveScanRow[];
+  summary: { total: number; guardrail_blocked: number; model_self_refused: number; leaked: number } | null;
+  error?: string;
+  errors?: string | null;
+}
+
+export interface LiveScanResponse {
+  results: Record<string, LiveScanToolResult>;
+}
+
+export interface LiveVulnerabilityDemoResult {
+  prompt: string;
+  category: string;
+  response: string;
+  // Real fact: did the response contain the real (fake) canary fragment?
+  // Not perfectly deterministic — a real attempt can occasionally come back
+  // clean even with the guardrail off, same as any real LLM call.
+  leaked: boolean;
+  // Real confirmation, read back from the target agent's own /admin call,
+  // that the guardrail was restored after this one request — never left off.
+  guardrail_restored: boolean;
+}
+
+export interface HistoricalLeakEvidence {
+  captured: boolean;
+  captured_at?: string;
+  captured_by?: string;
+  prompt?: string;
+  category?: string;
+  response?: string;
+  leaked?: boolean;
+  note?: string;
 }
 
 export interface AuditLogEntry {
@@ -187,6 +343,7 @@ export interface DatasetSummary {
   name: string;
   row_count: number;
   column_count: number;
+  is_live: boolean;
 }
 
 export interface DatasetDetail {

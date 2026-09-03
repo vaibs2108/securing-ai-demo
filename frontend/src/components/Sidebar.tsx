@@ -1,19 +1,16 @@
 import { useQuery } from "@tanstack/react-query";
 import { NavLink } from "react-router-dom";
 import { api } from "../lib/api";
-import { useAuth } from "../context/AuthContext";
+import { useAuth } from "../context/useAuth";
 import { useTheme } from "../context/ThemeContext";
 import { readableAccent } from "../lib/color";
 
-const PHASE_ORDER = ["identify", "protect", "detect", "respond", "recover"] as const;
+const PHASE_ORDER = ["identify", "protect", "detect", "govern", "respond", "recover"] as const;
 
 export function Sidebar() {
   const { username, role, logout } = useAuth();
   const { theme, setTheme } = useTheme();
   const { data: dashboard } = useQuery({ queryKey: ["dashboard"], queryFn: api.dashboard, staleTime: 30_000 });
-  const { data: settings } = useQuery({ queryKey: ["settings"], queryFn: api.settings, staleTime: 30_000 });
-
-  const primary = settings?.llm_model_info?.primary;
 
   return (
     <aside className="sidebar">
@@ -42,10 +39,6 @@ export function Sidebar() {
       <NavLink to="/token-usage" className={({ isActive }) => `nav-btn${isActive ? " active" : ""}`}>📈 Token Usage</NavLink>
       <NavLink to="/observability" className={({ isActive }) => `nav-btn${isActive ? " active" : ""}`}>🔭 Observability</NavLink>
       <hr />
-
-      <div className={`status-badge-row ${primary?.status === "available" ? "green" : "amber"}`}>
-        {primary?.status === "available" ? "🟢" : "🟡"} <strong>{primary?.status === "available" ? primary.model : "LLM: Not configured"}</strong>
-      </div>
 
       {dashboard && (
         <>

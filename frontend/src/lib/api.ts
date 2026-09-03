@@ -1,8 +1,9 @@
 import type {
-  AgentsDb, DashboardData, DatasetDetail, DatasetSummary, McpTool,
+  AgentsDb, AssetGraphData, DashboardData, DatasetDetail, DatasetSummary, McpTool,
   ObservabilityData, Phase, PhaseKey, PhaseStagesResponse, PhaseState,
   RunStageResponse, TokenUsage, CopilotResponse, CopilotMemoryStatus, CopilotUploadResponse,
-  DispatchTicketsResponse,
+  DispatchTicketsResponse, ReplayDetectResponse, TestPrompt, LakeraScreenResult, HistoricalLeakEvidence,
+  GuardrailProxyChatResult, LiveScanResponse, LiveVulnerabilityDemoResult,
 } from "./types";
 
 const TOKEN_KEY = "securing_ai_token";
@@ -64,6 +65,31 @@ export const api = {
   me: () => request<{ username: string; role: string }>("/auth/me"),
 
   dashboard: () => request<DashboardData>("/dashboard"),
+  assetGraph: () => request<AssetGraphData>("/asset-graph"),
+  replayDetect: () => request<ReplayDetectResponse>("/recover/replay-detect", { method: "POST" }),
+  historicalLeakEvidence: () => request<HistoricalLeakEvidence>("/recover/historical-leak-evidence"),
+  requestApproval: (uc: PhaseKey, stageKey: string, actionType: string, summary: string) =>
+    request<{ action_id: string; slack: { live: boolean; channel?: string; ts?: string; permalink?: string | null } }>(
+      `/phases/${uc}/stages/${stageKey}/request-approval`,
+      { method: "POST", body: JSON.stringify({ action_type: actionType, summary }) },
+    ),
+  approvalStatus: (actionId: string) =>
+    request<{ resolved: boolean; decision?: string; approver?: string; status_note?: string; execution_result?: unknown }>(
+      `/approval-status/${actionId}`,
+    ),
+
+  securityToolsTestPrompts: () => request<{ prompts: TestPrompt[] }>("/security-tools/test-prompts"),
+  lakeraScreen: (prompt: string) =>
+    request<LakeraScreenResult>("/security-tools/lakera-screen", { method: "POST", body: JSON.stringify({ prompt }) }),
+  guardrailProxyChat: (prompt: string) =>
+    request<GuardrailProxyChatResult>("/protect/guardrail-proxy/chat", { method: "POST", body: JSON.stringify({ prompt }) }),
+  detectLiveScan: (tools: string[]) =>
+    request<LiveScanResponse>("/detect/live-scan", { method: "POST", body: JSON.stringify({ tools }) }),
+  detectLiveVulnerabilityDemo: (promptId: string, provider = "groq") =>
+    request<LiveVulnerabilityDemoResult>("/detect/live-vulnerability-demo", {
+      method: "POST",
+      body: JSON.stringify({ prompt_id: promptId, provider }),
+    }),
 
   phases: () => request<Phase[]>("/phases"),
   phaseStages: (uc: PhaseKey) => request<PhaseStagesResponse>(`/phases/${uc}/stages`),
@@ -126,9 +152,17 @@ export const api = {
       ollama_model: string;
       ollama_base_url: string;
       mcp_tools: { name: string; required_env_vars: string[] }[];
+      github_target_repo: string;
+      github_token_set: boolean;
+      target_agent_url: string;
+      target_agent_reachable: boolean;
+      target_agent_disabled: boolean;
     }>("/settings"),
   saveSettings: (body: Record<string, unknown>) =>
-    request<{ saved: boolean }>("/settings", { method: "POST", body: JSON.stringify(body) }),
+    request<{ saved: boolean; reloaded: boolean; fetch_errors: Record<string, string> | null }>("/settings", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
   changeCredentials: (body: { current_password: string; new_username?: string; new_password?: string }) =>
     request<{ saved: boolean; new_username?: string }>("/settings/credentials", {
       method: "POST",

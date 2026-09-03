@@ -1,20 +1,62 @@
 import { useQuery } from "@tanstack/react-query";
 import { CartesianGrid, Line, LineChart, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis, Cell, Legend } from "recharts";
 import { api } from "../lib/api";
-import { TopTabs } from "../components/TopTabs";
 import { GlassCard, Gauge, KpiProgressCard, LoadingBlock } from "../components/ui";
+import { AssetGraph } from "../components/AssetGraph";
 import { PHASE_KPI_GROUPS, kpiStatus } from "../lib/kpiMeta";
 
-const PHASE_ORDER = ["identify", "protect", "detect", "respond", "recover"] as const;
+const PHASE_ORDER = ["identify", "protect", "detect", "govern", "respond", "recover"] as const;
 const PHASE_LABELS: Record<string, string> = {
-  identify: "Identify", protect: "Protect", detect: "Detect", respond: "Respond", recover: "Recover",
+  identify: "Identify", protect: "Protect", detect: "Detect", respond: "Respond", recover: "Recover", govern: "Govern",
 };
 const BLAST_COLORS: Record<string, string> = { Critical: "#ff2222", High: "var(--accent-red)", Medium: "var(--accent-amber)", Low: "var(--accent-blue)" };
 
 export function DashboardPage() {
   const { data, isLoading } = useQuery({ queryKey: ["dashboard"], queryFn: api.dashboard });
+  const { data: settings } = useQuery({ queryKey: ["settings"], queryFn: api.settings, staleTime: 30_000 });
+  const { data: mcpTools } = useQuery({ queryKey: ["mcp-tools"], queryFn: api.mcpTools, staleTime: 30_000 });
+  const { data: assetGraph } = useQuery({ queryKey: ["asset-graph"], queryFn: api.assetGraph, staleTime: 15_000 });
 
-  if (isLoading || !data) return <><TopTabs /><LoadingBlock label="Loading dashboard…" /></>;
+  if (isLoading || !data) return <LoadingBlock label="Loading dashboard…" />;
+
+  const toolByName: Record<string, boolean> = {};
+  if (mcpTools) {
+    for (const tools of Object.values(mcpTools)) {
+      for (const t of tools) toolByName[t.name] = t.live;
+    }
+  }
+  // One canonical list of every real connected system this demo depends on
+  // — deliberately a single strip, not split across multiple Dashboard
+  // sections, after Garak/PyRIT status previously appeared twice (here and
+  // in a since-removed second panel) and read as duplicated/inconsistent.
+  // `dashboard` gates the loading screen below, but `settings`/`mcpTools`
+  // are separate queries that can still be in flight on first paint — was
+  // rendering a real false-negative "not configured"/"not live" flash for
+  // every chip here on a fresh navigation, before those two caught up.
+  // `settingsLoaded`/`toolsLoaded` distinguish "still checking" (neutral)
+  // from a genuine "not configured" (only knowable once the query has
+  // actually returned).
+  const settingsLoaded = settings !== undefined;
+  const toolsLoaded = mcpTools !== undefined;
+  const liveSystems = [
+    { icon: "🐙", label: "GitHub", detail: !settingsLoaded ? "checking…" : settings?.github_target_repo || "not configured", live: !!settings?.github_target_repo, loading: !settingsLoaded },
+    {
+      icon: "🤖", label: "Target agent",
+      detail: !settingsLoaded ? "checking…" : !settings?.target_agent_url ? "not configured" : settings.target_agent_disabled ? `${settings.target_agent_url} (suspended)` : settings.target_agent_url,
+      live: !!settings?.target_agent_reachable,
+      loading: !settingsLoaded,
+    },
+    { icon: "💬", label: "Slack", detail: !toolsLoaded ? "checking…" : toolByName.slack ? "connected" : "not live", live: !!toolByName.slack, loading: !toolsLoaded },
+    { icon: "🛡️", label: "Lakera Guard", detail: !toolsLoaded ? "checking…" : toolByName.lakera_guard ? "live scanner" : "mock fallback", live: !!toolByName.lakera_guard, loading: !toolsLoaded },
+    { icon: "🐛", label: "Garak", detail: !toolsLoaded ? "checking…" : toolByName.garak ? "live scanner" : "mock fallback", live: !!toolByName.garak, loading: !toolsLoaded },
+    { icon: "🎯", label: "PyRIT", detail: !toolsLoaded ? "checking…" : toolByName.pyrit ? "live scanner" : "mock fallback", live: !!toolByName.pyrit, loading: !toolsLoaded },
+    {
+      icon: "🧠", label: "LLM",
+      detail: !settingsLoaded ? "checking…" : settings?.llm_model_info?.primary ? settings.llm_model_info.primary.model : "not configured",
+      live: settings?.llm_model_info?.primary?.status === "available",
+      loading: !settingsLoaded,
+    },
+  ];
 
   // Real recorded snapshots (one per calendar day the app was actually used),
   // not padded to a fixed 30 points — see app/observability/score_history.py.
@@ -32,19 +74,40 @@ export function DashboardPage() {
 
   return (
     <div>
-      <TopTabs />
       <div className="hero-banner">
         <div className="hero-title">AI Security Command Center</div>
-        <div className="hero-subtitle">Live posture across the NIST CSF lifecycle — Identify, Protect, Detect, Respond, Recover</div>
+        <div className="hero-subtitle">Live posture across the NIST CSF 2.0 lifecycle — Identify, Protect, Detect, Govern, Respond, Recover</div>
       </div>
 
-      <div className="grid-3" style={{ gridTemplateColumns: "repeat(5, 1fr)", marginBottom: 8 }}>
+      <div className="grid-3" style={{ gridTemplateColumns: "repeat(7, 1fr)", gap: 10, marginBottom: 16 }}>
+        {liveSystems.map((s) => (
+          <GlassCard key={s.label}>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+              <span>{s.icon}</span>
+              <span style={{ fontSize: "0.72rem", color: "var(--text-muted)" }}>{s.label}</span>
+            </div>
+            <div style={{ fontSize: "0.78rem", fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{s.detail}</div>
+            <div style={{ fontSize: "0.68rem", color: s.loading ? "var(--text-muted)" : s.live ? "var(--accent-green)" : "var(--text-muted)", marginTop: 2 }}>
+              {s.loading ? "○ checking…" : s.live ? "● connected" : "○ not live"}
+            </div>
+          </GlassCard>
+        ))}
+      </div>
+
+      <div className="grid-3" style={{ gridTemplateColumns: "repeat(6, 1fr)", marginBottom: 8 }}>
         {data.gauges.map((g) => (
           <GlassCard key={g.phase} accent={g.color}>
             <Gauge score={g.score} title={g.label.replace(/^[^\s]+\s/, "")} color={g.color} />
           </GlassCard>
         ))}
       </div>
+
+      <div className="section-title" style={{ marginTop: 24 }}>AI asset &amp; risk graph</div>
+      <p className="muted" style={{ fontSize: "0.8rem", marginBottom: 12 }}>
+        Every real entity flowing through the pipeline right now, in one connective view.{" "}
+        <a href="/asset-graph">Open full screen →</a>
+      </p>
+      {assetGraph ? <AssetGraph data={assetGraph} /> : <LoadingBlock label="Assembling the real asset graph…" />}
 
       <div className="section-title" style={{ marginTop: 24 }}>Operational Performance Index</div>
       <div className="grid-3" style={{ marginBottom: 8 }}>

@@ -118,7 +118,9 @@ a { color: inherit; }
   overflow-y: auto;
 }
 
-.main-content { flex: 1; min-width: 0; padding: 24px 32px 48px; }
+.main-content { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.main-content-inner { padding: 24px 32px 48px; }
+.story-bar { background: var(--bg-secondary); }
 
 .sidebar hr { border: 0; height: 1px; background: rgba(var(--overlay-rgb), 0.08); margin: 16px 0; }
 
@@ -191,23 +193,6 @@ a { color: inherit; }
 .status-badge-row { padding: 8px 12px; border-radius: 8px; font-size: 0.8rem; margin-bottom: 8px; }
 .status-badge-row.green { background: rgba(0,255,136,0.08); border: 1px solid rgba(0,255,136,0.2); }
 .status-badge-row.amber { background: rgba(255,170,0,0.08); border: 1px solid rgba(255,170,0,0.2); }
-
-/* ── Top tabs ─────────────────────────────────────────────────── */
-
-.top-tabs { display: flex; gap: 8px; margin-bottom: 24px; flex-wrap: wrap; }
-.top-tab {
-  border-radius: 10px;
-  padding: 9px 20px;
-  font-weight: 500;
-  font-size: 0.9rem;
-  background: var(--bg-glass);
-  border: 1px solid var(--border-glass);
-  cursor: pointer;
-  color: var(--text-secondary);
-  transition: all 0.2s ease;
-}
-.top-tab:hover { color: var(--text-heading); }
-.top-tab.active { background: rgba(0, 212, 255, 0.12); border-color: var(--accent-blue); color: var(--text-heading); }
 
 /* ── Glass cards ──────────────────────────────────────────────── */
 

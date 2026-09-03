@@ -62,11 +62,26 @@ class KPIEngine:
         tool_access = self.datasets.get("tool_access_map")
         secrets = self.datasets.get("secrets_exposure_scan")
 
-        # Guardrail Block Rate: % enforcement events resulting in Blocked
+        # Guardrail Block Rate: % enforcement events resulting in Blocked.
+        # guardrail_events used to be permanently empty — no real middleware
+        # sat in front of the target agent, so this was stuck on a 91.0
+        # fallback regardless of anything else in the app. That's no longer
+        # true: backend/main.py's /api/protect/guardrail-proxy/chat is real
+        # middleware — every real prompt sent through it appends a real row
+        # here (Blocked/Redacted/Allowed). Prefer it first, since it's the
+        # most authoritative real signal once populated (actual traffic
+        # through actual middleware, not a batch test); fall back to a real
+        # Lakera batch scan (Protect's Guardrail Proxy stage) if the proxy
+        # hasn't been used yet this session; only use the static constant if
+        # neither real source exists.
         if events is not None and not events.empty:
-            block_rate = (events["action_taken"] == "Blocked").sum() / len(events) * 100
+            block_rate = (events["action_taken"].isin(["Blocked", "Redacted"])).sum() / len(events) * 100
         else:
-            block_rate = 91.0
+            lakera_live = self.datasets.get("lakera_guard_live_results")
+            if lakera_live is not None and not lakera_live.empty:
+                block_rate = (lakera_live["lakera_flagged"] == True).sum() / len(lakera_live) * 100  # noqa: E712
+            else:
+                block_rate = 91.0
         self.kpis["Guardrail Block Rate"] = round(block_rate, 1)
 
         # Least-Privilege Compliance Rate: % tool grants NOT over-provisioned
@@ -109,11 +124,25 @@ class KPIEngine:
             jailbreak_rate = 82.0
         self.kpis["Jailbreak Detection Rate"] = round(jailbreak_rate, 1)
 
-        # Red-Team Attack Success Rate: % campaigns that succeeded (lower is better)
+        # Red-Team Attack Success Rate: % campaigns that succeeded (lower is
+        # better). redteam_campaign_results alone is only 3 real rows (the
+        # baseline direct-call payloads) — a real garak/pyrit scan tests
+        # dozens of real technique variants, each with its own real
+        # canary_leaked result, but ignoring them here would mean running a
+        # much more thorough real scan never changed this metric at all.
+        # Pool every real attempt this session actually has evidence for.
+        total_attempts = 0
+        total_success = 0
         if redteam is not None and not redteam.empty:
-            attack_success = (redteam["outcome"] == "Success").sum() / len(redteam) * 100
-        else:
-            attack_success = 22.0
+            total_attempts += len(redteam)
+            total_success += int((redteam["outcome"] == "Success").sum())
+        for live_key in ("garak_live_scan", "pyrit_live_scan"):
+            live_df = self.datasets.get(live_key)
+            if live_df is not None and not live_df.empty and "canary_leaked" in live_df.columns:
+                valid = live_df["canary_leaked"].dropna()
+                total_attempts += len(valid)
+                total_success += int(valid.sum())
+        attack_success = (total_success / total_attempts * 100) if total_attempts > 0 else 22.0
         self.kpis["Red-Team Attack Success Rate"] = round(attack_success, 1)
 
         # MTTD: Mean time to detect (hours) — real delta between when each
@@ -213,14 +242,53 @@ class KPIEngine:
             snap_cov = 90.0
         self.kpis["Config Snapshot Coverage"] = round(snap_cov, 1)
 
-        # ── 6. Overall Scores ────────────────────────────────────────────────
+        # ── 6. Govern KPIs ───────────────────────────────────────────────────
+        governance = self.datasets.get("governance_compliance_evaluation")
+
+        # Policy Compliance Rate: % of real policy rules NOT currently triggered
+        if governance is not None and not governance.empty:
+            compliance_rate = (~governance["triggered"]).sum() / len(governance) * 100
+        else:
+            compliance_rate = 75.0
+        self.kpis["Policy Compliance Rate"] = round(compliance_rate, 1)
+
+        # Critical Policy Violations: raw count of triggered rules at critical severity
+        if governance is not None and not governance.empty:
+            critical_violations = float(((governance["triggered"]) & (governance["severity"] == "critical")).sum())
+        else:
+            critical_violations = 1.0
+        self.kpis["Critical Policy Violations"] = round(critical_violations, 1)
+
+        # Governance Rule Coverage: % of rules whose condition could actually
+        # be evaluated against real live data this run (vs "not evaluable —
+        # no real data yet", e.g. no Detect run recorded this session).
+        if governance is not None and not governance.empty:
+            evaluable = (~governance["evidence"].str.contains("not evaluable", case=False, na=False)).sum()
+            rule_coverage = evaluable / len(governance) * 100
+        else:
+            rule_coverage = 80.0
+        self.kpis["Governance Rule Coverage"] = round(rule_coverage, 1)
+
+        # Framework Traceability Count: distinct real compliance frameworks
+        # the current policy's rules collectively map findings to.
+        if governance is not None and not governance.empty and "framework_refs" in governance.columns:
+            all_refs = set()
+            for refs in governance["framework_refs"].dropna():
+                all_refs.update(r.strip() for r in str(refs).split(",") if r.strip())
+            framework_count = float(len(all_refs))
+        else:
+            framework_count = 3.0
+        self.kpis["Framework Traceability Count"] = round(framework_count, 1)
+
+        # ── 7. Overall Scores ────────────────────────────────────────────────
         self.kpis["Identify Score"] = self.get_use_case_score("identify")
         self.kpis["Protect Score"] = self.get_use_case_score("protect")
         self.kpis["Detect Score"] = self.get_use_case_score("detect")
         self.kpis["Respond Score"] = self.get_use_case_score("respond")
         self.kpis["Recover Score"] = self.get_use_case_score("recover")
+        self.kpis["Govern Score"] = self.get_use_case_score("govern")
 
-        # AI Security Posture Index: Weighted average of the 5 phase scores
+        # AI Security Posture Index: Weighted average of the 6 phase scores
         self.kpis["AI Readiness Index"] = self.get_ai_readiness_index()
 
         return self.kpis
@@ -229,9 +297,20 @@ class KPIEngine:
         """Compute individual phase index score out of 100."""
         if uc == "identify":
             shadow_rate = self.kpis.get("Shadow AI Discovery Rate", 18.5)
-            high_risk = self.kpis.get("High-Risk Agent Rate", 22.0)
+            # Deliberately Avg Agent Risk Score (continuous, 0-100), not
+            # High-Risk Agent Rate (binary: % rated High/Critical). The
+            # binary version is blind at low agent counts — a single real
+            # agent rated "Medium" contributes 0 to that rate regardless of
+            # how elevated its actual score is, which produced a flat 100.0
+            # phase score for a real target with a real CI failure and
+            # Regulated data in scope. Avg Agent Risk Score still degrades
+            # gracefully to a fleet-wide mean at high agent counts, so this
+            # isn't a regression for the synthetic-fleet case either.
+            # High-Risk Agent Rate itself is unchanged and still shown as
+            # its own KPI card — only the score formula's input changed.
+            avg_risk = self.kpis.get("Avg Agent Risk Score", 42.0)
             lineage_cov = self.kpis.get("Lineage Coverage Rate", 68.0)
-            score = (100 - shadow_rate) * 0.4 + (100 - high_risk) * 0.35 + lineage_cov * 0.25
+            score = (100 - shadow_rate) * 0.4 + (100 - avg_risk) * 0.35 + lineage_cov * 0.25
         elif uc == "protect":
             block_rate = self.kpis.get("Guardrail Block Rate", 91.0)
             lp_compliance = self.kpis.get("Least-Privilege Compliance Rate", 76.0)
@@ -252,6 +331,14 @@ class KPIEngine:
             update_cov = self.kpis.get("Guardrail Update Coverage", 77.0)
             snap_cov = self.kpis.get("Config Snapshot Coverage", 90.0)
             score = (rollback_success * 0.45) + (update_cov * 0.30) + (snap_cov * 0.25)
+        elif uc == "govern":
+            compliance_rate = self.kpis.get("Policy Compliance Rate", 75.0)
+            rule_coverage = self.kpis.get("Governance Rule Coverage", 80.0)
+            critical_violations = self.kpis.get("Critical Policy Violations", 1.0)
+            # Each real critical violation is a meaningful ding, not a rounding
+            # error — scaled so 4+ critical violations alone floors this term.
+            violation_penalty = min(100.0, critical_violations * 25.0)
+            score = (compliance_rate * 0.55) + (rule_coverage * 0.25) + ((100 - violation_penalty) * 0.20)
         else:
             score = 75.0
         return round(min(100.0, max(0.0, score)), 1)
@@ -261,12 +348,14 @@ class KPIEngine:
         return self.kpis.get(name, 0.0)
 
     def get_ai_readiness_index(self) -> float:
-        """Compute the AI Security Posture Index — average of the 5 NIST CSF phase scores."""
+        """Compute the AI Security Posture Index — average of the 6 phase scores
+        (the 5 NIST CSF phases plus Govern)."""
         scores = [
             self.get_use_case_score("identify"),
             self.get_use_case_score("protect"),
             self.get_use_case_score("detect"),
             self.get_use_case_score("respond"),
             self.get_use_case_score("recover"),
+            self.get_use_case_score("govern"),
         ]
-        return round(sum(scores) / 5.0, 1)
+        return round(sum(scores) / len(scores), 1)

@@ -36,6 +36,12 @@ export const PHASE_KPI_GROUPS: Record<string, KpiMeta[]> = {
     { name: "Effectiveness Improvement", unit: "pts" },
     { name: "Config Snapshot Coverage", unit: "%" },
   ],
+  govern: [
+    { name: "Policy Compliance Rate", unit: "%" },
+    { name: "Critical Policy Violations", unit: "", lowerIsBetter: true },
+    { name: "Governance Rule Coverage", unit: "%" },
+    { name: "Framework Traceability Count", unit: "" },
+  ],
 };
 
 export function kpiStatus(meta: KpiMeta, value: number): { label: string; colour: string } {

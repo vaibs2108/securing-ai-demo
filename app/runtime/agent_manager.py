@@ -173,6 +173,7 @@ STAGE_MAP: Dict[str, List[str]] = {
     "detect": ["injection_detection", "behavior_monitoring", "red_teaming"],
     "respond": ["containment", "incident_playbook"],
     "recover": ["rollback", "guardrail_update"],
+    "govern": ["policy_catalog", "compliance_evaluation"],
 }
 
 AGENT_NAME_MAP: Dict[str, Dict[str, str]] = {
@@ -200,6 +201,10 @@ AGENT_NAME_MAP: Dict[str, Dict[str, str]] = {
         "rollback": "RollbackAgent",
         "guardrail_update": "GuardrailUpdateAgent",
     },
+    "govern": {
+        "policy_catalog": "GovernPolicyAgent",
+        "compliance_evaluation": "GovernComplianceAgent",
+    },
 }
 
 # ── Framework references per phase ───────────────────────────────────────────
@@ -210,6 +215,7 @@ FRAMEWORK_REFS: Dict[str, str] = {
     "detect": "MITRE ATLAS, OWASP LLM Top 10, NIST AI RMF 1.0 (Measure)",
     "respond": "NIST CSF 2.0 (Respond), NIST AI RMF 1.0 (Manage)",
     "recover": "NIST CSF 2.0 (Recover), NIST AI RMF 1.0 (Manage)",
+    "govern": "NIST AI RMF 1.0 (Govern), NIST CSF 2.0 (Govern), ISO/IEC 42001",
 }
 
 
@@ -257,7 +263,7 @@ class AgentManager:
         use_case: str,
         stage: str,
         datasets: Dict[str, Any],
-        data_source: str = "synthetic",
+        data_source: str = "live",
         username: str = "api_user",
         session_id: str = "api_session",
         memory: Any = None,
@@ -618,20 +624,18 @@ class AgentManager:
         frameworks = FRAMEWORK_REFS.get(use_case, "")
 
         source_declaration = {
-            "synthetic": (
-                "DATA SOURCE: SYNTHETIC — All data in this analysis is synthetic, "
-                "enterprise-grade demo data. Clearly watermark all outputs as synthetic. "
-                "Do NOT present findings as real-world confirmed."
+            "live": (
+                "DATA SOURCE: LIVE — All data in this analysis is real, fetched from the "
+                "real meridian-support-agent GitHub repository and/or the real deployed "
+                "target agent. Treat findings as real and production-relevant."
             ),
             "mcp": (
-                "DATA SOURCE: MCP LIVE — Data retrieved from live security tool "
-                "integrations via MCP protocol. Treat as production data."
+                "DATA SOURCE: LIVE + REAL-TIME TOOL SCAN — The same real live data as "
+                "above, plus a real-time external security tool scan (Lakera Guard / "
+                "Garak / PyRIT) retrieved via MCP for this stage. Treat all of it as real "
+                "and production-relevant."
             ),
-            "upload": (
-                "DATA SOURCE: FILE UPLOAD — Data uploaded by the analyst. "
-                "Treat as production data after validation."
-            ),
-        }.get(data_source, "DATA SOURCE: UNKNOWN")
+        }.get(data_source, "DATA SOURCE: LIVE (default — see live-demo architecture notes)")
 
         uc_labels = {
             "identify": "Securing AI — Identify",
@@ -639,6 +643,7 @@ class AgentManager:
             "detect": "Securing AI — Detect",
             "respond": "Securing AI — Respond",
             "recover": "Securing AI — Recover",
+            "govern": "Securing AI — Govern",
         }
 
         return f"""You are {agent_name}, a senior security AI agent within the {uc_labels.get(use_case, use_case)} pipeline.
@@ -656,6 +661,7 @@ REQUIREMENTS:
 5. FULL ANALYSIS: Analyse the FULL dataset provided via aggregation summaries — never just top-5 samples.
 6. RAW JSON ONLY: Output ONLY the JSON object below — no preamble, no closing remarks, no markdown code fences. Your entire response must start with {{ and end with }}.
 7. LENGTH BUDGET: Report AT MOST 6 findings, prioritizing the highest-severity ones — an incomplete JSON response (cut off before the closing brace) is useless, so stay concise rather than exhaustive. Keep each "evidence" and "recommendation" to one or two sentences.
+8. STRICT FIELD GROUNDING: Every factual claim in your summary and findings must trace to a field value literally present in the aggregated data below — never state the opposite of what a field says, and never add a fact that isn't there. This applies to EVERY boolean/flag field in the data (not just one example field) — `internet_facing`, `over_provisioned`, `exposed_to_llm`, `is_anomalous`, `hitl_approved`, `automated`, `rollback_available`, `detected`, and any other true/false or yes/no column. Before writing a finding title or sentence that asserts a flag's state (e.g. calling something "over-provisioned", "exposed", "anomalous", "internet-facing"), re-read that row's actual flag value first — if the flag is `false`/`False`, your finding must say it is NOT that thing, or omit the point entirely; do not phrase a false flag as if it were a confirmed problem. A dataset can legitimately contain a clean/compliant row (a flag correctly set to false) — report that honestly as "no issue found" rather than inventing a violation to fill the findings list. If you are inferring rather than reading a field directly, say so explicitly ("inferred from X") rather than stating it as fact.
 
 RESPONSE FORMAT (strict JSON):
 {{
@@ -701,6 +707,11 @@ DATASET AGGREGATION SUMMARY:
 Analyse the full dataset aggregation above. Produce your structured JSON response now.
 """
 
+    # Below this row count, include the real rows verbatim in the
+    # aggregation (see _pre_aggregate) rather than only independent
+    # per-column frequency tables.
+    _RAW_ROW_INCLUSION_THRESHOLD = 20
+
     def _pre_aggregate(self, df: pd.DataFrame) -> Dict[str, Any]:
         """Pandas pre-aggregation (zero LLM cost).
 
@@ -709,11 +720,27 @@ Analyse the full dataset aggregation above. Produce your structured JSON respons
         - frequency tables for categorical columns
         - anomaly concentration (values > 2σ)
         - time-series bucketing if datetime columns exist
+        - the real rows verbatim, for small datasets (see below)
         """
         result: Dict[str, Any] = {
             "shape": list(df.shape),
             "columns": list(df.columns),
         }
+
+        # Frequency tables summarize each column independently — they throw
+        # away which value in one column co-occurred with which value in
+        # another column on the same real row (e.g. which rule_name paired
+        # with which decision). At real-world live-demo row counts (1-4
+        # rows, not the old 300-row synthetic fleet) that row-level pairing
+        # is exactly what the LLM needs and frequency tables can't provide,
+        # and reconstructing it from independent per-column distributions is
+        # unreliable — this caused a real cross-wiring bug where a Govern
+        # compliance summary attributed one rule's real reason to a
+        # different rule. Small enough datasets get the real rows verbatim
+        # instead of relying on the LLM to correctly recombine frequency
+        # tables back into rows.
+        if 0 < len(df) <= self._RAW_ROW_INCLUSION_THRESHOLD:
+            result["rows"] = df.to_dict(orient="records")
 
         # Numeric summary
         numeric_df = df.select_dtypes(include=["number"])
@@ -734,8 +761,14 @@ Analyse the full dataset aggregation above. Produce your structured JSON respons
             if anomalies:
                 result["anomaly_concentration"] = anomalies
 
-        # Frequency tables for categorical columns (top 10)
-        cat_df = df.select_dtypes(include=["object", "category"])
+        # Frequency tables for categorical columns (top 10). Boolean columns
+        # are included here too — pandas' "bool" dtype falls through both
+        # this selector and the numeric one above by default, which was
+        # silently dropping flag columns (over_provisioned, internet_facing,
+        # exposed_to_llm, etc.) from the aggregation entirely, leaving the
+        # LLM with zero real grounding signal for exactly the fields most
+        # likely to be asserted incorrectly.
+        cat_df = df.select_dtypes(include=["object", "category", "bool"])
         freq_tables: Dict[str, Dict[str, int]] = {}
         for col in cat_df.columns[:10]:
             try:
@@ -819,19 +852,60 @@ Analyse the full dataset aggregation above. Produce your structured JSON respons
         confidence = max(40, min(99, confidence))
         confidence = _derive_confidence(parsed.get("findings", []), aggregation or {}, confidence)
 
+        # The frontend's AgentOutcome type contract requires these three as
+        # plain strings — real, observed failure mode: the LLM sometimes
+        # returns a structured object for passed_to_next_stage instead
+        # (e.g. {"sanctioned_agents": [...]}) despite the prompt asking for
+        # a string. Rendered directly in React, an object crashes the whole
+        # panel white ("Objects are not valid as a React child") with no
+        # visible error — worse than a wrong-shaped string, which just
+        # looks a little odd. Coerce rather than drop: real LLM content, so
+        # stringify it into something readable instead of discarding it.
+        def _coerce_str(value: Any, fallback: str) -> str:
+            if isinstance(value, str):
+                return value
+            if value is None:
+                return fallback
+            try:
+                return json.dumps(value, default=str)
+            except (TypeError, ValueError):
+                return str(value)
+
+        def _coerce_str_list(value: Any) -> List[str]:
+            if not isinstance(value, list):
+                return []
+            return [v if isinstance(v, str) else json.dumps(v, default=str) for v in value]
+
+        def _coerce_findings(value: Any) -> List[Dict[str, Any]]:
+            # Same real risk, same fix, for Finding's own string fields
+            # (title/severity/description/evidence/recommendation) — the
+            # frontend renders each directly as a React child too.
+            if not isinstance(value, list):
+                return []
+            out = []
+            for f in value:
+                if not isinstance(f, dict):
+                    continue
+                f = dict(f)
+                for key in ("id", "title", "severity", "description", "evidence", "recommendation"):
+                    if key in f:
+                        f[key] = _coerce_str(f.get(key), "")
+                out.append(f)
+            return out
+
         return {
             "agent_name": agent_name,
             "use_case": use_case,
             "stage": stage,
             "data_source": data_source,
             "ai_confidence": confidence,
-            "step_by_step_execution": parsed.get("step_by_step_execution", []),
-            "output_generated": parsed.get("output_generated", "Analysis executed without structured output."),
-            "passed_to_next_stage": parsed.get("passed_to_next_stage", "State context carried forward."),
-            "summary": parsed.get("summary", ""),
-            "findings": parsed.get("findings", []),
+            "step_by_step_execution": _coerce_str_list(parsed.get("step_by_step_execution", [])),
+            "output_generated": _coerce_str(parsed.get("output_generated"), "Analysis executed without structured output."),
+            "passed_to_next_stage": _coerce_str(parsed.get("passed_to_next_stage"), "State context carried forward."),
+            "summary": _coerce_str(parsed.get("summary"), ""),
+            "findings": _coerce_findings(parsed.get("findings", [])),
             "kpi_deltas": parsed.get("kpi_deltas", {}),
-            "recommendations": parsed.get("recommendations", []),
+            "recommendations": _coerce_str_list(parsed.get("recommendations", [])),
             "timestamp": timestamp,
             "aggregation": aggregation or {},
         }
@@ -902,8 +976,11 @@ Analyse the full dataset aggregation above. Produce your structured JSON respons
             "respond": {
                 "containment": (
                     "Determine and execute containment actions (isolate agent, revoke API key, "
-                    "disable tool access, rate-limit, kill session) for flagged incidents. "
-                    "Route high-severity actions through HITL approval before execution."
+                    "disable tool access, rate-limit, kill session) for flagged incidents. Each "
+                    "incident carries a real source_phase (Govern/Identify/Protect/Detect) and "
+                    "source_id — cite both for every finding, and group your recommendations by "
+                    "source_phase so it's clear which upstream phase each remediation traces back "
+                    "to. Route high-severity actions through HITL approval before execution."
                 ),
                 "incident_playbook": (
                     "Match each incident to a named SOAR playbook by trigger condition and "
@@ -918,8 +995,30 @@ Analyse the full dataset aggregation above. Produce your structured JSON respons
                 ),
                 "guardrail_update": (
                     "Convert red-team and incident root causes into deployed guardrail policy "
-                    "updates. KEY REQUIREMENT: Report a measured before/after block-rate "
-                    "effectiveness delta for every update, closing the loop back into Protect."
+                    "updates. You also have the live Consolidated Security Incident Queue "
+                    "(source_phase/source_id per row) — cross-reference it against the rollback "
+                    "log and explicitly call out which real open items (by source_phase and "
+                    "source_id) still lack a corresponding deployed update. KEY REQUIREMENT: "
+                    "Report a measured before/after block-rate effectiveness delta for every "
+                    "update, closing the loop back into Protect."
+                ),
+            },
+            "govern": {
+                "policy_catalog": (
+                    "Review the real, authored governance policy fetched from the target repo's "
+                    "governance/policy.yaml. Confirm every rule has a clear owner, a versioned "
+                    "last-updated date, and at least one mapped compliance framework reference. "
+                    "Flag any rule missing traceability metadata."
+                ),
+                "compliance_evaluation": (
+                    "For each policy rule, report whether it is currently triggered and the "
+                    "resulting decision (Compliant / Blocked / Human Approval Required / "
+                    "Remediation Required) — these were already computed deterministically from "
+                    "real live cross-phase data, not by you; your job is to explain each decision "
+                    "clearly and recommend a specific remediation for every triggered rule. "
+                    "KEY REQUIREMENT: cite the exact real evidence field behind each triggered "
+                    "rule — never assert a violation without pointing to the real data behind it, "
+                    "and never soften or override a triggered rule's real decision."
                 ),
             },
         }

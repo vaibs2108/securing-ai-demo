@@ -12,6 +12,7 @@ import { SettingsPage } from "./pages/SettingsPage";
 import { TokenUsagePage } from "./pages/TokenUsagePage";
 import { ObservabilityPage } from "./pages/ObservabilityPage";
 import { DataExplorerPage } from "./pages/DataExplorerPage";
+import { AssetGraphPage } from "./pages/AssetGraphPage";
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { retry: 1, refetchOnWindowFocus: false } },
@@ -28,6 +29,7 @@ export default function App() {
               <Route path="/" element={<Layout><DashboardPage /></Layout>} />
               <Route path="/phase/:uc" element={<Layout><PhaseWorkspace /></Layout>} />
               <Route path="/data-explorer" element={<Layout><DataExplorerPage /></Layout>} />
+              <Route path="/asset-graph" element={<Layout><AssetGraphPage /></Layout>} />
               <Route path="/agents" element={<Layout><AgentsPage /></Layout>} />
               <Route path="/copilot" element={<Layout><CopilotPage /></Layout>} />
               <Route path="/settings" element={<Layout><SettingsPage /></Layout>} />

@@ -18,6 +18,11 @@ export function SettingsPage() {
   const [mcpCreds, setMcpCreds] = useState<Record<string, string>>({});
   const [savedMsg, setSavedMsg] = useState<string | null>(null);
 
+  const [targetRepo, setTargetRepo] = useState("");
+  const [githubToken, setGithubToken] = useState("");
+  const [reloadMsg, setReloadMsg] = useState<string | null>(null);
+  const [reloadErrors, setReloadErrors] = useState<Record<string, string> | null>(null);
+
   const [currentPassword, setCurrentPassword] = useState("");
   const [newUsername, setNewUsername] = useState("");
   const [newPassword, setNewPassword] = useState("");
@@ -32,8 +37,33 @@ export function SettingsPage() {
       setReasoningModel(settings.reasoning_model);
       setOllamaModel(settings.ollama_model);
       setOllamaBaseUrl(settings.ollama_base_url);
+      setTargetRepo(settings.github_target_repo);
     }
   }, [settings]);
+
+  const reloadMut = useMutation({
+    mutationFn: () =>
+      api.saveSettings({
+        github_target_repo: targetRepo.trim() || undefined,
+        github_token: githubToken.trim() || undefined,
+      }),
+    onSuccess: (res) => {
+      setGithubToken("");
+      qc.invalidateQueries({ queryKey: ["settings"] });
+      qc.invalidateQueries({ queryKey: ["dashboard"] });
+      if (!res.reloaded) {
+        setReloadMsg("Target repo unchanged — nothing to reload.");
+        setReloadErrors(null);
+      } else if (res.fetch_errors && Object.keys(res.fetch_errors).length > 0) {
+        setReloadMsg(null);
+        setReloadErrors(res.fetch_errors);
+      } else {
+        setReloadMsg("Retargeted and reloaded — every phase fetched real data from the new repo successfully.");
+        setReloadErrors(null);
+      }
+      setTimeout(() => setReloadMsg(null), 8000);
+    },
+  });
 
   const saveMut = useMutation({
     mutationFn: () => {
@@ -90,6 +120,52 @@ export function SettingsPage() {
         <div className="hero-title">⚙️ System Settings</div>
         <div className="hero-subtitle">Configure AI routing engines and enterprise vendor credentials</div>
       </div>
+
+      <div className="section-title" style={{ marginTop: 8 }}>🎯 Live Target Repo</div>
+      <p className="muted" style={{ fontSize: "0.82rem", marginBottom: 16 }}>
+        This is the real GitHub repo every phase fetches live data from. Point it at a different real repo to
+        re-run the whole pipeline against it — this only works for repos your <code>GITHUB_TOKEN</code> can
+        actually access, so a different repo usually needs a matching fine-grained PAT too. The default{" "}
+        <code>meridian-support-agent</code> target keeps working unchanged if you leave this alone.
+      </p>
+      <GlassCard accent="var(--accent-amber)" style={{ marginBottom: 24 }}>
+        <label className="field-label">Target repo (owner/name)</label>
+        <input
+          type="text"
+          value={targetRepo}
+          onChange={(e) => setTargetRepo(e.target.value)}
+          placeholder="owner/repo-name"
+          style={{ marginBottom: 14 }}
+        />
+        <label className="field-label">GitHub token for that repo</label>
+        <input
+          type="password"
+          value={githubToken}
+          onChange={(e) => setGithubToken(e.target.value)}
+          placeholder={settings?.github_token_set ? "Currently set — leave blank to keep it" : "Fine-grained PAT scoped to the repo above"}
+          style={{ marginBottom: 14 }}
+        />
+        <button
+          className="btn"
+          onClick={() => reloadMut.mutate()}
+          disabled={reloadMut.isPending || !targetRepo.trim()}
+        >
+          {reloadMut.isPending ? "Reloading live data…" : "🔄 Reload live data"}
+        </button>
+        {reloadMsg && <div className="badge badge-green" style={{ marginTop: 10, marginLeft: 10 }}>{reloadMsg}</div>}
+        {reloadErrors && Object.keys(reloadErrors).length > 0 && (
+          <div style={{ marginTop: 12 }}>
+            <div className="badge badge-red" style={{ marginBottom: 6 }}>
+              Retargeted, but {Object.keys(reloadErrors).length} phase(s) couldn't fetch real data from this repo:
+            </div>
+            {Object.entries(reloadErrors).map(([phase, err]) => (
+              <div key={phase} className="muted" style={{ fontSize: "0.78rem", marginBottom: 4 }}>
+                <strong style={{ textTransform: "capitalize" }}>{phase}</strong>: {err}
+              </div>
+            ))}
+          </div>
+        )}
+      </GlassCard>
 
       <div className="grid-2">
         <GlassCard accent="var(--accent-blue)">
@@ -150,10 +226,11 @@ export function SettingsPage() {
 
       <div className="section-title" style={{ marginTop: 24 }}>🔌 MCP Integrations</div>
       <p className="muted" style={{ fontSize: "0.82rem", marginBottom: 16 }}>
-        Only tools with a real, specifically-named product and a genuinely wireable integration are listed —
-        no generic placeholders. <strong>Hosted API</strong> tools take a vendor API key. <strong>Self-hosted
-        runner</strong> tools (Garak, PyRIT) have no public vendor API — you run them yourself and give us the
-        URL of your own runner.
+        Every tool here is either a real, specifically-named product with a genuinely wireable integration, or —
+        for <strong>Data Pipeline</strong> — an honest, generic connector slot for a real source you don't have
+        wired up yet (a SIEM, a log platform, any events API). <strong>Hosted API</strong> tools take a vendor
+        API key. <strong>Self-hosted runner</strong> tools (Garak, PyRIT) have no public vendor API — you run
+        them yourself and give us the URL of your own runner.
       </p>
       {mcpTools && Object.entries(mcpTools).map(([category, tools]) => (
         <div key={category} style={{ marginBottom: 20 }}>

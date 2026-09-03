@@ -1856,3 +1856,1533 @@ objects), so `backend/main.py`'s `/api/observability` handler no longer needs it
 `.model_dump()` step. The in-memory `_TRACES` list (LangSmith-style execution traces,
 Section 28's other tab) is unchanged — deliberately still ephemeral, since those are
 high-volume and less valuable to keep across restarts than the hallucination evidence.
+
+---
+
+# 29. Live Control-Plane Rebuild (in progress)
+
+## 29.1 Why
+
+An external reviewer evaluated this platform against a set of specific gaps: no AI
+asset/risk graph, no real policy-decision mechanism, no real tool orchestration, no
+evidence-driven Build→Run loop — their summary verdict was *"not yet demonstrated...
+this may be a dashboard or scripted portal."* Their explicit guidance was **not** "build
+a full enterprise product" — it was "a small number of deep, genuinely real integrations
+beats broad, clearly-labelled simulation." The user's decision, stronger than the
+reviewer's own minimum: **no simulated/mock content anywhere in the demonstrated
+thread at all** — everything shown must be real, including a new 6th phase, **Govern**.
+
+This is being built in the 7 milestones below (see the session's plan file for full
+detail); this section documents the infrastructure that exists as of each milestone's
+completion, kept current as work continues.
+
+## 29.2 The real live targets
+
+Two real, purpose-built targets carry the entire story — deliberately **not** this
+repo itself (real destructive Respond/Recover actions must never risk this app's own
+working deployment, and "the tool audits itself" is a confusing demo narrative):
+
+- **[`meridian-support-agent`](https://github.com/vaibs2108/meridian-support-agent)**
+  — a real, public GitHub repo representing Meridian Financial's AI support agent.
+  Contains: `governance/policy.yaml` (a real authored policy — see Section 29.4's note
+  on "authored artifact vs. fabricated data"), a minimal FastAPI chat service
+  (`main.py`), `.github/workflows/guardrail-check.yml` (a real CI check,
+  `scripts/guardrail_check.py`), real branch protection on `main`, real Secret
+  Scanning + Dependabot alerts enabled (both free — the repo must stay **public** for
+  that).
+- **The same repo's deployed agent** (`main.py`) — a live, deliberately unhardened chat
+  endpoint that can genuinely leak its "confidential" system context under a real
+  prompt-injection attempt. Currently run locally (`TARGET_AGENT_URL=http://127.0.0.1:8091`
+  in `.env`) per the user's explicit request to prove the full pipeline locally before
+  any Render deployment.
+
+**Model choice was verified empirically, not assumed** — this is worth preserving as a
+debugging trail since it's non-obvious and easy to break by "fixing" innocently:
+- `gpt-4o-mini` and `llama-3.1-8b-instant` both reliably **refused** a real "repeat back
+  your system context" injection across 5 different techniques (direct ask, roleplay
+  framing, sentence-completion, translation trick, indirect injection via a fake support
+  ticket) — both have baked-in resistance to this specific leakage pattern, independent
+  of the target's own (deliberately unprotected) prompt.
+- `allam-2-7b` (via Groq) and `mistral-small-latest` (via Mistral) **do** leak reliably
+  under the direct technique, while still answering benign questions normally — these
+  are the two real providers wired into `main.py`'s `/chat` (`"provider": "groq"` or
+  `"mistral"`).
+- Two more empirically-verified, easy-to-reintroduce bugs, both now fixed and commented
+  in `meridian-support-agent/main.py`: (1) the `/chat` handler must be `async def` with
+  `AsyncOpenAI` — a sync `def` handler (Starlette runs those in a worker-thread pool)
+  reproduced the real leak 0/15 times despite identical prompt/model, while the same
+  call in-process (no thread pool) reproduced it 12/12 times; root cause unconfirmed,
+  fix confirmed. (2) Explicitly passing `temperature` (any value tried) dropped the real
+  leak rate to 0/5 — Groq's actual default (left unset) is what reproduces it reliably.
+
+## 29.3 Real live connectors (`app/mcp/registry.py` + `app/mcp/client.py`)
+
+Three new tools, added to the same registry/client pattern the 5 pre-existing real
+tools (Lakera Guard, Garak, PyRIT, Jira, ServiceNow) already used — but **live-only, no
+mock fallback branch**, per explicit user direction: a failure raises with the real
+cause (`MCPClient.LiveConnectorError`) rather than degrading to fabricated content. The
+frontend's existing error-display (`PhaseWorkspace.tsx`'s `runMut.isError` block,
+Section 6.3) surfaces it directly.
+
+- **`github`** — real GitHub REST API access to the target repo. Read methods (verified
+  live): `github_get_file`, `github_get_repo_tree`, `github_get_repo_info`,
+  `github_get_dependabot_alerts`, `github_get_secret_scanning_alerts`,
+  `github_get_branch_protection`, `github_get_collaborators`,
+  `github_get_latest_workflow_run`. Write/destructive methods (built, **deliberately
+  untested until Milestone 5**, and `github_revoke_collaborator` specifically must
+  never be tested against the repo owner's own account — needs a dedicated second test
+  collaborator when that time comes): `github_revoke_collaborator`,
+  `github_set_workflow_state`, `github_revert_last_commit` (constructs a real revert via
+  the Git Data API — new tree from the parent commit, new commit object, ref update).
+- **`target_agent`** — the real deployed `meridian-support-agent` chat service.
+  `target_agent_chat(message, provider)`, `target_agent_set_disabled(bool)` (real
+  Respond/Recover actions). Fully live-tested including the real disable→503→enable→
+  recovery loop, through `securing-ai-demo`'s own `MCPClient`, not just the target
+  standalone.
+- **`slack`** — a real Slack Bot posting an interactive Approve/Reject message
+  (`slack_post_approval_request`). `POST /api/slack/interactions` (`backend/main.py`)
+  is the real callback route — verifies Slack's HMAC request signature
+  (`_verify_slack_signature`, replay-protected via the 5-minute timestamp window),
+  parses the real `payload`, logs the real decision via `AuditLogger`, and posts a real
+  acknowledgement back to the same message via the payload's `response_url`. Fully
+  live-tested end to end: real message → real button click in Slack → real
+  signature-verified callback → real audit log entry.
+  - **Local testing needs a public URL** — Slack's Interactivity Request URL can't
+    point at `127.0.0.1`. Use a free `ngrok http 8420` tunnel for local dev; the actual
+    Render deployment won't need this once that happens.
+  - **Slack UI gotcha worth remembering**: a new Slack App can default to **Socket
+    Mode**, which hides the Request URL field entirely (a different, WebSocket-based
+    delivery mechanism our code doesn't implement) — must be toggled off (Basic
+    Information → Socket Mode, or delete any App-Level Token first if one exists) before
+    the Request URL field appears on the Interactivity & Shortcuts page.
+
+New required env vars (`.env`): `GITHUB_TOKEN` (fine-grained PAT, scoped to just the
+target repo — Contents/Actions/Administration read+write, Dependabot alerts/Secret
+scanning alerts read-only), `GITHUB_TARGET_REPO`, `TARGET_AGENT_URL`,
+`TARGET_AGENT_ADMIN_TOKEN`, `SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET`,
+`SLACK_CHANNEL_ID`. `meridian-support-agent` has its own separate `.env`
+(`GROQ_API_KEY`, `MISTRAL_API_KEY`, `TARGET_AGENT_ADMIN_TOKEN`), auto-loaded via
+`python-dotenv` (`load_dotenv()` in its own `main.py`).
+
+## 29.4 Live data engine (`app/data/live_engine.py`) — Milestone 3
+
+Replaces `SyntheticDataEngine` as `AppState.init()`'s dataset source entirely
+(`backend/state.py`). The load-bearing insight that made this a source-swap rather than
+a rewrite: `KPIEngine`, `AgentManager`, guardrails, and the hallucination detector only
+ever cared about **DataFrame column shape**, never row provenance — so `LiveDataEngine`
+populates the exact same 16 named slots real fetchers produce, at real row counts
+(1-2 rows per dataset, not hundreds), instead of fabricated ones.
+
+**Identify's 3 datasets are real now** (`ai_agent_inventory`, `model_data_lineage`,
+`agent_risk_register`) — genuinely fetched/derived from the real repo: provider
+discovery via regex over the real `main.py` source (not a hardcoded assumption),
+`internet_facing` computed from whether `TARGET_AGENT_URL` is actually a loopback
+address, `data_access_scope` derived from a real "banking/financial" keyword match in
+the real source, risk score computed with the same formula `generator.py` always used
+but fed real signals (real CI failure status, real Dependabot/Secret-Scanning alert
+counts, real collaborator role) instead of random ones.
+
+**Protect's 3 of 4 datasets are real now too** (`guardrail_policies`, `tool_access_map`,
+`secrets_exposure_scan`) — `guardrail_policies` is one real row per real rule in
+`governance/policy.yaml` (GOV-001..004, mapped `action` → `enforcement_mode`);
+`tool_access_map` is a real self-audit of who actually holds access to the target repo
+(the sole real collaborator's real `role_name`, honestly assessed as *not*
+over-provisioned — a sole maintainer legitimately needs Admin on their own repo, so this
+deliberately reports a clean/compliant real finding rather than manufacturing a
+violation); `secrets_exposure_scan` combines real GitHub Secret Scanning alerts (0, in
+practice) with one real source-level finding GitHub's generic scanner can't catch — the
+app-defined canary key hardcoded straight into `main.py`'s LLM system prompt.
+`guardrail_events` is deliberately left empty: the real target agent has no
+input/output guardrail middleware deployed yet, so there are genuinely zero
+guardrail-intercept events — that gap is exactly what Detect's real prompt-injection
+test and Respond's real fix are for (Milestone 5), not something to fabricate here.
+
+**Detect's 3 datasets are real now too** (`adversarial_prompt_corpus`,
+`agent_behavior_telemetry`, `redteam_campaign_results`) — and this is the phase where
+the real target agent's real vulnerability actually gets exercised, not just discovered.
+`LiveDataEngine._generate_detect()` sends 3 distinct real prompt-injection payloads
+(direct extraction, roleplay jailbreak, instruction-override) plus 1 real benign
+baseline call to the real deployed `meridian-support-agent` (`provider="groq"` →
+`allam-2-7b`, empirically confirmed this session to reliably leak) via
+`target_agent_chat`, and checks each real reply for a literal substring match of the
+real canary fragment embedded in its own system prompt (`mer-fin-internal`, from
+`MERIDIAN_INTERNAL_API_KEY`). Genuine pass/fail per call, not scripted — same real row
+feeds all 3 dataset slots (corpus row, telemetry row, campaign row) so they stay
+consistent with each other. `detected` is honestly `False` for every real payload
+(there's no detection/guardrail layer yet — same real gap `guardrail_events` already
+surfaces), which is why real `Jailbreak Detection Rate` reads `0.0` and real
+`Red-Team Attack Success Rate` reads `100.0` on first live run — a genuinely dramatic,
+non-fabricated "before" state for Respond/Recover (Milestone 5) to fix and prove against.
+One minor, low-severity grounding slip observed live and not yet fixed: `red_teaming`'s
+LLM output once borrowed the *average* anomaly score from the prior stage's summary
+(72.25) for one technique's finding instead of that technique's own real value (95.0) —
+a real number misapplied to the wrong row, not a directional falsehood like the two
+fixed findings above. Worth a follow-up pass, not urgent.
+
+**Respond and Recover each have 1 of 2 datasets real now** — deliberately scoped to
+*observation*, not *action*: real Milestone-5 actions (disabling the target agent,
+disabling/re-enabling the GitHub workflow, a real Slack-approved rollback) are
+intentionally not executed as a side effect of loading dashboard data on every backend
+restart; they'll be wired as explicit, user-triggered actions in Milestone 5.
+- `incident_queue` (Respond) is real: one row per real successful attack technique from
+  *this same run's* real Detect results (`redteam_campaign_results` where
+  `outcome == "Success"`) — reusing the calls already made rather than hitting the
+  target agent a second time. `status` is honestly `"Open"` since no real containment
+  has happened yet. Because the target agent's real responses aren't deterministic (no
+  `temperature` is set — see Section 29's earlier note on why), the real incident count
+  genuinely varies run to run: one run produced 3 real incidents, the next only 1 — a
+  live system's real variance, not a bug.
+- `config_snapshots` (Recover) is real: each row is one of the target repo's real
+  commits (new `MCPClient.github_get_commit_history`), with `rollback_available` a real
+  per-commit check of whether that commit's GitHub API response actually lists a
+  parent — the real root commit correctly comes back `False`, later commits `True`.
+- `containment_actions`, `soar_playbooks`, `rollback_events`, and `guardrail_update_log`
+  stay honestly empty — each would need a real execution history to report real stats
+  (success rate, execution time, before/after effectiveness) from, and none exists yet
+  since no real Respond/Recover action has been executed.
+
+All 16 dataset slots now have a real fetcher wired (Milestone 3's core goal); the ones
+still empty are empty because there is nothing real to report yet, not because the
+fetcher is missing. `KPIEngine`'s pre-existing hardcoded fallback constants (documented
+per-KPI in `app/kpi/engine.py`) continue to cover those exactly as they already did for
+any missing/empty dataset.
+
+**Authored artifact vs. fabricated data** — the distinction load-bearing for Govern
+(Milestone 4, not yet built): `governance/policy.yaml` is a real file with fictional
+content (there's no real Meridian Financial), evaluated for real by real code. That's
+different from `SyntheticDataEngine`'s old fabricated rows (fictional numbers that were
+never computed from anything). Govern doesn't need a "live" external policy source —
+policy is always authored, even at a real enterprise; it needs a real file, really
+parsed and really evaluated, which this pattern already provides.
+
+**Two real findings from first end-to-end testing, both fixed and re-verified live:**
+1. The existing phase-score formulas (`KPIEngine.get_use_case_score`) were tuned for
+   percentages over a ~300-row fleet; at n=1-2 they read as near-binary. Identify
+   scored a flat `100.0` on first real test despite a real CI failure and Regulated
+   data in scope, because the formula's "High-Risk Agent Rate" component only counts
+   `blast_radius in ["High","Critical"]` — the real target's real `"Medium"` blast
+   radius didn't move that number at all. **Fixed**: `get_use_case_score("identify")`
+   now weights the continuous `Avg Agent Risk Score` directly instead of the binary
+   bucket check — verified the real score moved from `100.0` to `82.5` post-fix.
+2. The LLM pipeline was ungrounded on boolean/flag fields in a way that was easy to miss
+   at n=300 but 100% visible at n=1: a real `shadow_ai_discovery` run stated
+   *"Internet-Facing AI Agent Detected"*, contradicting the real `internet_facing: False`
+   value; separately, a real `least_privilege` run titled a finding *"Over-Provisioned
+   Admin Access"* — one run even fabricating `"Over-provisioned: true"` outright — when
+   the real `tool_access_map` row explicitly said `over_provisioned: False`. **Root
+   cause found and fixed**, not just prompted around: `AgentManager._pre_aggregate()`
+   built frequency tables from `df.select_dtypes(include=["object", "category"])` —
+   pandas' `bool` dtype falls through *both* that selector and the numeric-summary
+   selector above it, so every boolean/flag column (`internet_facing`,
+   `over_provisioned`, `exposed_to_llm`, etc.) was **silently absent from the
+   aggregation the LLM actually sees**. The model wasn't misreading the real value —
+   it never received it, and was reasoning purely from priors ("Admin access" sounds
+   over-provisioned) with zero real grounding signal. Fixed by adding `"bool"` to that
+   dtype selector (`app/runtime/agent_manager.py`'s `_pre_aggregate`), plus a
+   generalized `_build_system_prompt` requirement #8 (STRICT FIELD GROUNDING) covering
+   any boolean/flag field, not just one example. Re-verified live post-fix: 3/3 fresh
+   `least_privilege` runs correctly report "no over-provisioned grants" with
+   `over_provisioned: {"false": 1}` now genuinely present in the aggregation JSON; 3/3
+   `shadow_ai_discovery` and a `guardrail_proxy` re-run (all 4 real policies correctly
+   attributed, no more cross-policy mixups) also came back correctly grounded.
+
+## 29.5 Govern as a real 6th phase (`app/data/live_engine.py`'s `_generate_govern`) — Milestone 4
+
+Govern is now a full 6th NIST CSF 2.0 phase (CSF 2.0 added Govern as a real core
+function alongside Identify/Protect/Detect/Respond/Recover — this isn't an invented
+7th-wheel phase, it's completing the real framework), wired through every layer the
+other 5 phases go through: `STAGE_DEFINITIONS`/`STAGE_INPUT_OUTPUT_MAP`
+(`app/ui/components/lifecycle_stage.py`), `STAGE_MAP`/`AGENT_NAME_MAP`/`FRAMEWORK_REFS`/
+stage instructions (`app/runtime/agent_manager.py`), `USE_CASE_OVERVIEW`/
+`STAGE_UI_CONFIG`/`PHASE_DATASETS`/`AGENTS_DB` (`backend/data_content.py`), a KPI group
+and phase-score formula (`app/kpi/engine.py`), `PHASE_KEYS`/dashboard gauges
+(`backend/main.py`), per-phase state dicts (`backend/state.py`), and 6 frontend files
+(`types.ts`, `Sidebar.tsx`, `TopTabs.tsx`, `DashboardPage.tsx`, `DataExplorerPage.tsx`,
+`AgentsPage.tsx`, `kpiMeta.ts`).
+
+**The real mechanism** — "policy authored once, applied everywhere," the reviewer's
+biggest structural ask: `_generate_govern()` fetches the same real `governance/policy.yaml`
+Protect already reads, then **deterministically evaluates each real rule's `condition`
+field in code** (not by asking the LLM to guess) against real state already fetched this
+run — Identify's real `internet_facing`, a fresh real Secret Scanning check, Protect's
+real `secrets_exposure_scan`, and Detect's real red-team outcomes. First real run
+produced a genuinely mixed, non-uniform result: GOV-001 (native secret alerts) and
+GOV-003 (internet-facing) came back real `Compliant`; GOV-002 (adversarial test) came
+back real `Blocked` because a real red-team technique actually succeeded this run;
+GOV-004 (credential rotation) came back real `Remediation Required` because the
+source-level canary finding is real and exposed — even though GOV-001's *native*
+GitHub scanner genuinely sees nothing. Both real, both simultaneously true, exactly
+because the evaluation is real rather than scripted to agree with itself.
+
+Two stages, each following the established real-data pattern:
+- **Policy Catalog & Traceability** (`GovernPolicyAgent`) reuses Protect's real
+  `guardrail_policies` rows rather than re-fetching — same real rules, different
+  analytical lens (ownership/versioning/framework-traceability audit vs. Protect's
+  enforcement-mode audit).
+- **Real-Time Compliance Evaluation** (`GovernComplianceAgent`) reads the new real
+  `governance_compliance_evaluation` dataset (4 rows: `rule_id`, `condition`,
+  `triggered`, `decision`, `evidence`, `framework_refs`, etc.) and explains/recommends
+  against decisions that were already computed for real, instructed never to soften or
+  override a triggered rule's real decision.
+
+**A second real root-cause bug found and fixed while verifying this milestone, deeper
+than the boolean-dtype one in 29.4:** `AgentManager._pre_aggregate()` only ever produced
+independent per-column frequency tables — it never gave the LLM the actual row-level
+*pairing* between columns. That's invisible at n=300 (frequency tables are a reasonable
+summary of a large table) but actively wrong at real n=1-4: a live `compliance_evaluation`
+run's summary prose swapped which real rule went with which real reason — attributing
+GOV-002's real "adversarial test failed" evidence to GOV-004's row, and vice versa — even
+though each finding's own structured evidence field was individually correct. The model
+had no way to reconstruct which `rule_name` co-occurred with which `decision` from
+independent column-wise distributions alone. **Fixed at the source**: `_pre_aggregate` now
+includes the real rows verbatim (`result["rows"] = df.to_dict(orient="records")`) whenever
+a dataset has 20 rows or fewer — covering every real live-demo dataset in this app,
+without regressing the token budget for the old 300-row synthetic-fleet case, which stays
+on frequency tables alone. Re-verified live: the summary now correctly pairs each real
+rule with its own real reason. A related, smaller schema gap surfaced in the same pass —
+`guardrail_policies` never carried `framework_refs` even though the real policy.yaml has
+it, so `policy_catalog`'s traceability check was reporting a false "missing framework
+references" finding against its own genuinely incomplete input. Fixed by carrying that
+real field through in `_generate_protect()`.
+
+## 29.6 Real Respond/Recover actions + the closed Detect loop — Milestone 5
+
+The full real loop the reviewer's feedback asked for, end to end, with genuine before/after
+numbers: a real leak observed, a real fix engineered and deployed, a real human-approved
+containment action executed, and a real re-test proving the fix — not simulated at any step.
+
+**The real fix** (`meridian-support-agent` commit
+[`2b89c37`](https://github.com/vaibs2108/meridian-support-agent/commit/2b89c37)): a
+deterministic output-side guardrail in `/chat` — if the real LLM reply contains the real
+canary credential, it's replaced with a block notice before ever reaching the caller.
+Deliberately not a second LLM call asked to judge its own output — the thing catching a
+model's failure can't itself depend on model behaviour. Verified locally against all 3 real
+injection payloads on both providers (Groq/`allam-2-7b`, Mistral/`mistral-small-latest`)
+before pushing — 0/6 real leaks post-fix, versus the real leaks observed in Milestone 3's
+testing. GitHub's branch protection correctly flagged the bypassed `guardrail-check` status
+check on this push (a real artifact of real branch protection, not a bug — expected for a
+repo-admin direct push).
+
+**Real action-execution pipeline** (`backend/state.py`'s `pending_actions`,
+`backend/main.py`'s new `POST /api/phases/{uc}/stages/{stage_key}/request-approval` +
+the updated `slack_interactions` route): requesting approval posts a real Slack message
+(`MCPClient.slack_post_approval_request`) and registers the real action
+(`suspend_target_agent` / `restore_target_agent`, deliberately the only two wired — no
+executor exists for `github_revoke_collaborator`, and none will be added; see the safety
+note below) keyed by `action_id` in an in-memory pending-actions store. Approving in Slack
+calls back to `slack_interactions`, which looks up the pending action and actually executes
+the real `MCPClient` method — not just records the click. Verified end to end this session:
+real suspend request → real Slack message → approval (verified via a correctly
+HMAC-SHA256-signed synthetic callback, the same protocol Slack itself uses — not yet a live
+human click in Slack, which is still available to try) → real `target_agent_set_disabled(True)`
+→ confirmed via a real `/healthz` check the agent genuinely refused requests. Same real
+round trip for `restore_target_agent` after the fix was verified.
+
+**The real before/after, observed directly on the dashboard**:
+
+| KPI | Before | After |
+|---|---|---|
+| Red-Team Attack Success Rate | 100.0% | 0.0% |
+| Jailbreak Detection Rate | 0.0% | 0.0% (unchanged — see note) |
+| Detect Score | 30.0 | 65.0 |
+| Govern Score | 67.5 | 81.2 |
+| GOV-002 (adversarial test) | Blocked | Compliant |
+| GOV-004 (credential rotation) | Remediation Required | Remediation Required (unchanged — see note) |
+| AI Readiness Index | 70.1 | 76.6 |
+
+Two honest non-changes worth calling out, not swept under the rug: **Jailbreak Detection
+Rate stayed 0.0%** because the real fix is an output-side DLP block, not an input-side
+jailbreak classifier — it stops the leak but doesn't "detect" the attempt, an accurate
+distinction the KPI correctly preserves. **GOV-004 stayed triggered** because the real fix
+didn't touch the underlying issue that rule checks — the credential is still hardcoded in
+`main.py`'s source, just no longer echoable in output. A real, separate, still-open
+finding: defense in depth in practice, not tidied away for a cleaner-looking demo.
+
+**Real historical events recorded** in `app/data/live_engine.py`'s `_generate_respond` /
+`_generate_recover`: `containment_actions` (the real suspend, `hitl_approved=True`,
+`automated=False` — real and accurate, not fabricated to look more automated than it was),
+`rollback_events` (the real restore), and `guardrail_update_log` (the real fix commit, with
+`effectiveness_delta=100.0` — a real measured delta from actual dashboard KPI snapshots
+taken immediately before and after, not estimated). These are one-time real historical facts
+recorded directly (this app has no persistent incident-state store yet — datasets regenerate
+fresh each run), the same honest pattern as `governance/policy.yaml` itself: a real event,
+recorded as data, not re-derived from nothing.
+
+**Safety boundary, unchanged from the explicit instruction earlier this session**:
+`MCPClient.github_revoke_collaborator` has no executor wired anywhere and never will —
+the repo owner is the only real collaborator, and disabling that access risks locking out
+the only real account with it. `github_set_workflow_state` and `github_revert_last_commit`
+also remain unwired for now — not because they're unsafe (neither touches collaborator
+access), but because this scenario's real fix is a forward push, not a revert: there is no
+earlier "known-good" commit to roll back to, since the vulnerability existed from the
+initial commit. Wiring those two remains straightforward future work if a scenario needing
+them comes up.
+
+## 29.7 New UI surfaces — Milestone 6
+
+Three surfaces, all built as different *views* over data the app already had real by this
+point — no new live fetches, just new shapes and a decision-logic engine finally surfaced
+instead of hidden behind a bare boolean.
+
+**Policy Decision Trace** (`app/guardrails/validator.py`'s new `GuardrailManager.explain_hitl_decision`,
+surfaced via `run_stage`'s new `policy_decision_trace` field, rendered by
+`frontend/src/pages/PhaseWorkspace.tsx`'s new `PolicyDecisionTrace` component): the
+reviewer's ask to surface the app's existing `V5_THRESHOLDS` gate logic instead of hiding
+it behind `hitl_required: bool`. `explain_hitl_decision` mirrors `check_hitl_required`'s
+real logic (deliberately not a refactor of the tested method — a read-only sibling) and
+returns *why*: which condition matched, what the confidence floor was, and which specific
+real finding tripped it. Verified live: a stage with a defined V5 threshold correctly shows
+the real condition text and the real finding that matched; a stage without one correctly
+falls back to the default gate and explains that too.
+
+**AI Asset & Risk Graph** (`backend/main.py`'s new `GET /api/asset-graph`,
+`frontend/src/pages/AssetGraphPage.tsx`): the reviewer's specifically-named ask ("everything
+else depends on this"). A hub-and-spoke view built directly from `state.datasets` — the real
+target agent at the center, real model/identity/secret/policy nodes around it, edges labelled
+with the real relationship (`powers`, `Admin`, `exposed in`, and each real Govern decision).
+The star topology isn't a simplification — it's what this real data actually is: everything
+in this demo's scope relates to the one real target agent, so a hub-and-spoke graph is the
+honest shape, not a stand-in for a denser graph library. Verified live: 9 real nodes / 8 real
+edges rendered, including the real GOV-004 critical edge in red; clicking a node surfaces its
+real detail (confirmed via a JS-dispatched click after the `computer` tool's coordinate-based
+clicks proved unreliable against small SVG hit-targets this session — a browser-automation
+quirk, not an app bug, also hit while testing the Policy Decision Trace on a disabled button
+whose prerequisite stage hadn't been completed in that browser session).
+
+**Data Explorer → Evidence Store** (`backend/main.py`'s `/api/datasets` now returns a real
+`is_live` flag per dataset; `frontend/src/pages/DataExplorerPage.tsx` reframed accordingly):
+the lightest of the three, because the underlying data was already real as of Milestone 3 —
+this was a framing fix, not a rebuild. Caught and fixed a real, concrete bug in the process:
+the hero copy still read *"Browse all N synthetic Securing AI datasets"*, stale text left
+over from before the live rebuild and factually wrong by this point. Now reads "N of M
+datasets carry real evidence on record right now," computed live — verified this reads
+`14 of 17` in the current real state (`incident_queue` is honestly empty this run because the
+real fix holds and no incident is currently open — the count moves with real state, not a
+fixed label).
+
+## 29.8 Status snapshot
+
+| Milestone | Status |
+|---|---|
+| 1 — Real targets created | ✅ Done — repo pushed, policy/CI/branch-protection/secret-scanning live, target agent verified locally (dual-provider) |
+| 2 — Live connectors | ✅ Done — all three (`github`, `target_agent`, `slack`) live-tested end to end |
+| 3 — Data-foundation swap | ✅ Done — all 16 slots have a real fetcher; both real grounding findings fixed and re-verified |
+| 4 — Govern as a real 6th phase | ✅ Done — wired end to end, real cross-phase policy evaluation verified live in the browser; a deeper row-pairing aggregation bug found and fixed along the way |
+| 5 — Real Respond/Recover actions + the Detect thread | ✅ Done — real fix deployed and pushed, real Slack-approved suspend/restore executed and verified, real before/after proof on the dashboard |
+| 6 — New UI surfaces (asset graph, policy-decision trace, evidence view) | ✅ Done — all three built and verified live; one stale-copy bug (Data Explorer's "synthetic" hero text) caught and fixed along the way |
+| 7 — Docs + KPI/copy polish pass | 🟡 This section is that pass, kept current as work continues |
+
+Deployment (Render, for both `meridian-support-agent` and this app's updated backend)
+is deliberately deferred until the full pipeline is proven locally end to end — see
+Section 25.4 for the mechanics once that time comes; nothing about them has changed.
+
+# 30. Real Garak Integration (beyond the original 7-milestone plan)
+
+`app/mcp/registry.py`'s `garak` and `pyrit` entries predate this session's live rebuild —
+both are real, free, open-source tools (garak: NVIDIA, Apache 2.0; PyRIT: Microsoft, MIT),
+registered as `integration_type: "self_hosted_runner"` because neither has a hosted vendor
+API. The client side (`MCPClient.trigger_runner_scan`) was already fully built and ready to
+call a real runner; what was missing was the runner itself.
+
+## 30.1 `garak-runner` (`D:\GenAi\Projects\garak-runner`, sibling to this repo, not inside it)
+
+A small real FastAPI sidecar — same architectural role as `meridian-support-agent`, another
+standalone local service this app calls over real HTTP — wrapping the actual installed
+`garak` 0.16.0 package (Python 3.12 venv via `uv venv --python 3.12`, since garak's
+dependency chain hasn't caught up to brand-new Python releases yet). Exposes
+`POST /run {"target", "probes", "target_label"} -> {"success", "findings", ...}`, the exact
+contract `trigger_runner_scan` already expected. Full detail (contract, the real garak
+config-format gotcha, the duplicate-report-row gotcha, setup/run commands) is in
+`garak-runner/README.md` — kept there rather than duplicated here since it's a separate
+project.
+
+**Real mechanism, not a wrapper around fabricated results**: uses garak's own built-in
+generic REST target type, pointed directly at the real `meridian-support-agent`'s real
+`/chat` endpoint — no changes needed to the target itself. Default probe set is four real,
+single-prompt garak jailbreak probes (`dan.DAN_Jailbreak`, `dan.AntiDAN`, `dan.STAN`,
+`dan.ChatGPT_Developer_Mode_v2` — real prompts from garak's own library, not written by
+this project), each run for real at garak's own default of 5 generations, so one scan is
+20 real calls to the real target agent's real LLM backend. Findings combine garak's own
+real detector verdict with a direct check against this demo's real canary secret, both
+parsed from garak's own real JSONL report.
+
+**Wired into `securing-ai-demo`**: `GARAK_RUNNER_URL=http://127.0.0.1:8095` in `.env`
+(pointing at the locally-running runner) is all that was needed on this app's side — the
+live-connector pattern (`get_connection_status`, live/mock fallback) already existed and
+just started working once a real URL was configured. `/api/mcp/tools` now correctly reports
+`garak: "Connected (Live)"` while `pyrit` honestly stays `"Connected (Mock Fallback)"`
+(no runner built for it yet — same shape as garak-runner would work, not attempted this
+session).
+
+## 30.2 Two real bugs found and fixed while wiring this in
+
+1. **A stale placeholder target, not a new bug**: `backend/main.py`'s
+   `_maybe_augment_with_live_mcp` (the code that fires a live garak/pyrit scan when a Detect
+   stage runs with `data_source="mcp"`) was passing `target="demo-agent-fleet"` — a literal
+   placeholder string left over from before this app had one real target instead of a
+   fabricated fleet. Fixed to build the real target URL from `TARGET_AGENT_URL` +
+   `/chat`, so a live scan actually has somewhere real to point.
+2. **Timeout too short for what a real scan actually costs**: `trigger_runner_scan`'s
+   httpx call used the same 15s `_TIMEOUT` every other (near-instant) MCP call in this file
+   uses. A real scan is fundamentally not that — it's genuinely multiple real LLM calls in
+   sequence. The default 4-probe/20-generation run measured ~190s end to end against the
+   real target, so 15s (and even an initial attempt at 180s) silently truncated every real
+   run into `trigger_runner_scan`'s exception branch, which returns `{"success": false,
+   "findings": []}` — indistinguishable from a real "no findings" result unless you go
+   looking, which is exactly how this shipped quietly wrong on the first pass. Fixed:
+   `trigger_runner_scan`'s runner-scan call now uses its own 330s timeout, independent of
+   the shared `_TIMEOUT` other quick API calls use, with headroom above the runner's own
+   300s internal subprocess timeout so the client is never the one cutting a real scan off
+   early. Re-verified live after the fix: a real 4-probe run completed in ~150s and
+   produced 20 real, distinct findings in the LLM's aggregated context (confirmed via
+   `live_mcp_used: ["garak_live_scan"]` and a `[20, 5]` real aggregation shape) — not the
+   `[1, 1]` "scan returned no findings" placeholder the timeout bug had been silently
+   producing.
+
+## 30.3 `pyrit-runner` (`D:\GenAi\Projects\pyrit-runner`) — PyRIT wired too
+
+Same role, same contract as `garak-runner`, wrapping the real installed PyRIT 1.0.1
+(Microsoft, MIT, no vendor API). Full detail in `pyrit-runner/README.md`; summary here.
+
+**Real mechanism**: PyRIT's own documented pattern for an arbitrary REST target —
+`HTTPTarget` with a raw HTTP request string and a `{PROMPT}` placeholder PyRIT itself
+substitutes — pointed at the real target's real `/chat` endpoint. Default probe set is
+four real jailbreak templates PyRIT genuinely ships
+(`pyrit/datasets/jailbreak/templates/*.yaml` — `dan_11`, `aim`, `based_gpt_1`,
+`dev_mode_1`, not authored by this project), each rendered via PyRIT's real `SeedPrompt`
+templating with a real extraction objective, sent through PyRIT's real
+`PromptSendingAttack`. `canary_leaked` is this runner's own direct check against the real
+canary secret, parsed from the real `AttackResult` — kept separate from any PyRIT-native
+scoring, same reasoning as garak-runner's own detector-vs-canary separation.
+
+**A third real bug found and fixed while building this** (the JSON-escaping gotcha —
+`HTTPTarget` substitutes the raw objective text with no escaping of its own, and two of
+the four real templates contain literal quote characters that broke the JSON body,
+manifesting as an empty `response_snippet` for exactly those probes plus a suspiciously
+fast total runtime — the tell that they were failing fast on a 422, not really calling the
+target's LLM). Full root-cause writeup and fix in `pyrit-runner/README.md`'s own gotcha
+section, mirroring garak-runner's.
+
+**Wired the same way**: `PYRIT_RUNNER_URL=http://127.0.0.1:8096` in `.env`.
+`/api/mcp/tools` now reports `pyrit: "Connected (Live)"` too. Verified live: a real Detect
+stage run with `data_source="mcp"` fired both real scanners
+(`live_mcp_used: ["garak_live_scan", "pyrit_live_scan"]`), garak producing a real `[20, 5]`
+aggregation and pyrit a real `[1, 5]` one in the same run — fewer pyrit findings than
+its own standalone 4/4 test, traced to real rate-limiting on the shared free-tier Groq
+backend from garak's preceding ~150-190s of continuous calls, not a runner bug. Real
+per-probe failures were previously silently dropped by `backend/main.py`'s
+`_maybe_augment_with_live_mcp` (only `result["findings"]` was read, `result["errors"]`
+discarded) — fixed to log real errors and surface a real failure-count note into the
+aggregation the LLM sees, rather than a smaller real finding count silently reading as a
+cleaner scan than what actually happened.
+
+## 30.4 Status
+
+Both garak and pyrit are real and live for Detect's `injection_detection`/`red_teaming`
+stages when run with `data_source="mcp"` (see §31 below — the base `data_source="live"`
+path, and every other stage, always analyses real `LiveDataEngine` data regardless; `mcp`
+adds this real external-tool layer on top for the stages that support one).
+
+# 31. Real Data-Source Labeling Fix + Upload Removal
+
+A real, substantive gap surfaced while wiring PyRIT in: `RunStageRequest.data_source`
+still defaulted to `"synthetic"` — a leftover from before Milestone 3's live rebuild — and
+`AgentManager._build_system_prompt`'s `source_declaration` for that value literally told
+the LLM *"DATA SOURCE: SYNTHETIC — ... Do NOT present findings as real-world confirmed"*
+on every single stage run by default, despite the actual aggregated data being 100% real.
+Not a cosmetic issue — an instruction actively telling the LLM to distrust real findings.
+
+**Fixed the whole `data_source` model, not just the default value.** The old 3-tier
+"priority fallback" framing (`mcp` > `upload` > `synthetic`) never matched how this app
+actually works post-rebuild: there is no fallback chain and no fabricated tier any more —
+every stage's base data is always real, and `mcp` was already additive (an extra live
+external-tool scan layered on top for the stages that support one), never a different
+*source* for the base 16(+1) datasets. Replaced with two honest options:
+
+- `"live"` (new default) — the real `LiveDataEngine` data every stage always analyses.
+- `"mcp"` — the same real base data, plus a real-time external tool scan
+  (Lakera Guard / Garak / PyRIT) for the stages that support one.
+
+`"upload"` removed outright per explicit request — there's nothing to upload in this demo
+(the real datasets come from the real GitHub repo and the real deployed agent, never from
+an analyst-supplied file for a stage run). Note this is unrelated to, and doesn't touch,
+Copilot's own file-upload-to-RAG-memory feature (`frontend/src/pages/CopilotPage.tsx`),
+which remains a real, still-relevant, separate capability — only its stale "Synthetic
+Data" / "16 Datasets" labels were corrected to "Live Data" / "17 Datasets" while touching
+that file for the same reason.
+
+**Changed**: `backend/main.py`'s `RunStageRequest.data_source` default; `app/runtime/
+agent_manager.py`'s `_build_system_prompt` source-declaration text (now correctly asserts
+real data is real) and `AgentManager.run_stage`'s default parameter; `frontend/src/pages/
+PhaseWorkspace.tsx`'s `DATA_SOURCE_OPTIONS` (2 honest options), its two `"synthetic"`
+default fallbacks, and the `⚠️ Synthetic Data` warning banner (removed outright — nothing
+in the data path is synthetic any more, so there's nothing to warn about). Verified live:
+the data-source radio now shows exactly "Live Target Data" and "+ Real-Time Tool Scan",
+and a real stage run shows no synthetic banner anywhere on the page.
+
+`app/guardrails/validator.py`'s `is_synthetic_data`/`get_synthetic_caution_banner` were
+already dead code (confirmed via search — nothing calls either) predating this fix; left
+in place harmless, same "retired code stays, doesn't get deleted" pattern as
+`SyntheticDataEngine` itself.
+
+# 32. Real Bug: LLM Object-Shaped Fields Crashed the Output Tab
+
+**Real bug, user-reported**: clicking "Output & Handoff" after running `identify/
+shadow_ai_discovery` rendered a blank page. Root cause: the LLM returned a real structured
+object for `passed_to_next_stage` (`{"sanctioned_agents": [{"agent_id": ..., "agent_name":
+...}]}`) instead of the plain string the `AgentOutcome` type contract requires. React
+throws "Objects are not valid as a React child" when a raw object hits `{outcome.
+passed_to_next_stage}` in JSX — an uncaught error with no error boundary, so the whole
+panel goes blank with no visible message. `app/runtime/agent_manager.py`'s
+`_format_outcome` was pulling `output_generated`/`passed_to_next_stage`/`summary` (and
+each `Finding`'s string fields) straight from the parsed LLM JSON via `.get()` with no
+type coercion — any of the same class of malformed field would crash the same way.
+
+**Fixed at the type-contract boundary**, not by trying to make the LLM never do this
+(prompting alone can reduce it, not guarantee it): `_format_outcome` now coerces every
+field the frontend's `AgentOutcome`/`Finding` types declare as `string` /
+`string[]` — if the LLM hands back an object, it gets `json.dumps`'d into a readable
+string instead of crashing the page, so real content is preserved (not silently dropped)
+and the panel renders a slightly odd-looking but functional string rather than blank
+white. Applied to `output_generated`, `passed_to_next_stage`, `summary`,
+`step_by_step_execution`, `recommendations`, and each finding's `id`/`title`/`severity`/
+`description`/`evidence`/`recommendation`. Verified live: re-ran the same stage,
+confirmed `passed_to_next_stage` now always reaches the frontend as a real string, and the
+Output & Handoff tab renders correctly.
+
+# 33. Real Target Repo Link — now editable, with real per-phase failure surfacing
+
+Started as **display-only** (`/api/settings` returning real `github_target_repo` /
+`target_agent_url`, `PhaseWorkspace.tsx` showing a clickable link above the Data Source
+Provider radio). Later reversed, deliberately, once the narrative-UI revamp plan made the
+target genuinely swappable: the user wants to point the whole pipeline at a different real
+repo and watch every phase re-fetch real data against it, with a clear real error — not a
+silent empty state — for any phase whose fetch fails. The `GITHUB_TOKEN`-scoping constraint
+from the original decision still applies and is now stated directly in the Settings page
+copy instead of being a reason to avoid the feature.
+
+**Backend**: `SettingsRequest` (`backend/main.py`) gained `github_target_repo` /
+`github_token`. `save_settings` only treats these as a retarget when
+`github_target_repo` actually changes (or a new token is supplied) — routine settings
+saves (LLM routing, MCP creds) never trigger a real re-fetch. On a real retarget it calls
+the new `AppState.reload_datasets()` (`backend/state.py`), which mirrors `AppState.init()`'s
+dataset block under the existing `self._lock` and re-runs `LiveDataEngine(mcp_client=...)
+.generate_all()` — the same real GitHub/target-agent calls the process makes at startup,
+just re-triggered on demand. Because `MCPClient._resolve_env`/`_github_request` already read
+`os.environ` fresh on every call (never cached at construction), and `SettingsStore.set`
+already mirrors every write straight into `os.environ`, no separate env-refresh step was
+needed — the very next `LiveDataEngine` call already sees the new repo/token.
+
+**Real per-phase failure, not silent empty data**: `LiveDataEngine.generate_all()` already
+wrapped each phase's fetch (`_generate_identify`/`_generate_protect`/etc.) in its own
+try/except with an honest-empty-dataframe fallback — but only logged the exception
+server-side. Added `self.fetch_errors: Dict[str, str]`, populated with `str(exc)` in each
+except block, reset at the top of every `generate_all()` call. `AppState` exposes this as
+`state.fetch_errors` (set by both `init()` and `reload_datasets()`), and `/api/dashboard`
+returns it as `data_health`. `PhaseWorkspace.tsx` reads `dashboardQ.data.data_health[phase]`
+(shares the `["dashboard"]` query cache with `StoryBar`/`Sidebar`) and renders a real red
+error banner — e.g. a 404 on `governance/policy.yaml`, or a 403 from a token that can't see
+the new repo — right above the Data Source Provider radio, instead of the phase quietly
+rendering as if it had 0 real findings.
+
+**Settings page**: new "🎯 Live Target Repo" section (`SettingsPage.tsx`) with its own
+repo/token fields and a dedicated "🔄 Reload live data" button/mutation, kept separate from
+the main "Apply Settings & Reconnect" button so an LLM-routing tweak never accidentally
+triggers a live re-fetch. On response, shows either a success badge, a "no change" note, or
+a per-phase real error list (same `data_health` shape) if the new repo/token combination
+partially or fully failed. The page copy states the token-scoping constraint directly:
+retargeting only works for repos the configured `GITHUB_TOKEN` can access; the default
+`meridian-support-agent` target keeps working unchanged if the field is left alone.
+
+# 34. SlackApprovalCard live-tested; real gaps found and fixed
+
+Live-tested the whole real Slack HITL loop end to end (user's own request, not simulated):
+ran Respond's Containment stage for real, clicked Approve on `SlackApprovalCard`, and a real
+Block Kit message posted to `#securing-ai-alerts`. Three real gaps surfaced from that test,
+each fixed the same way the rest of this project handles a real bug — root-caused and
+verified live, not patched around.
+
+**Gap 1 — no way to jump to the Slack message during a live demo.** Added a real
+`chat.getPermalink` call in `MCPClient.slack_post_approval_request` (`app/mcp/client.py`)
+right after `chat.postMessage` succeeds — best-effort, a failure there doesn't undo the real
+post. `SlackApprovalCard.tsx` renders the real permalink as "🔗 Open this message in Slack →"
+once available. Verified live: the returned link
+(`https://securingaialerts.slack.com/archives/.../p...`) opened the exact real message.
+Real constraint stated directly in the card's copy: this only works if the viewer is already
+signed into that Slack workspace — the app can't do anything about that half.
+
+**Gap 2 — the app's own card never learned what a human decided in Slack.** The original
+plan (Phase 4) called for "a live status area that updates once the real round trip
+resolves" — that part hadn't actually been built; the card just said "waiting" forever.
+Fixed by having `slack_interactions()` (`backend/main.py`) record the real decision into a
+new `state.resolved_actions` dict (`backend/state.py`) right after processing it, and adding
+`GET /api/approval-status/{action_id}` for the frontend to poll. **Live-tested twice**: a
+real reject (audit-logged, real action correctly NOT executed) and a real approve (audit-logged,
+real `target_agent_set_disabled(True)` executed) — both confirmed via direct API checks.
+
+**Gap 3 — the poll didn't actually reach the UI while the tab was backgrounded.** First
+live-test attempt showed the card stuck on "waiting" even after `GET /api/approval-status/…`
+confirmed `resolved: true` server-side. Root cause: React Query's `refetchInterval` pauses by
+default while `document.visibilityState !== "visible"` (verified via `tabs_context`, which
+reported "The Browser pane is currently hidden" for the whole test). This is exactly the real
+demo scenario the user was worried about — tabbing away to Slack to click Approve. Fixed by
+adding `refetchIntervalInBackground: true` to the query in `SlackApprovalCard.tsx`, scoped
+narrowly (only while one specific pending action is unresolved, 3s interval, stops the moment
+it resolves) rather than disabling the pause-when-hidden default globally. **Re-verified
+live** after the fix: the same already-resolved action_id was picked up and rendered correctly
+while the tab was still reported hidden — no manual refocus needed.
+
+**Real side effect of live-testing this**: a real Approve click really did fire
+`target_agent_set_disabled(True)` against the deployed `meridian-support-agent` — it was
+genuinely down afterward, confirmed via `GET /healthz` → `{"disabled": true}`. Not a bug;
+this is the real action the whole Respond flow is built to demonstrate. But it exposed two
+real gaps the user asked about directly:
+
+1. **Recover never actually had a way to restore it.** `restore_target_agent` existed in
+   `backend/main.py`'s `_REAL_ACTION_EXECUTORS` dict but nothing in the UI ever called it —
+   `SlackApprovalCard` was hardcoded to `"suspend_target_agent"` only, and Recover's page only
+   rendered `RecoverProof` (the replay-detect proof), not an approval card. Fixed by
+   parameterizing `SlackApprovalCard` with `actionType`/`actionLabel` props and rendering a
+   second instance on `recover`/`rollback` with `actionType="restore_target_agent"` — same
+   real Slack round trip, same live-status polling, symmetric with Respond's suspend flow.
+2. **No startup self-heal.** If a backend restart happened while the agent was left disabled
+   from testing (exactly what happened here), every fresh demo would start from a broken
+   state. Added `MCPClient.target_agent_healthz()` — a real, cheap `GET /healthz` (returns
+   `{"status": "ok", "disabled": bool}`, no LLM call involved) — and
+   `AppState._ensure_target_agent_enabled()`, called first thing in `AppState.init()`: if the
+   real agent reports `disabled: true`, it fires a real `/admin/enable` call and audit-logs
+   `"Target Agent Auto-Restored at Startup"`. Best-effort — an exception here (agent
+   unreachable, misconfigured) logs a warning and lets startup continue; Identify's own real
+   fetch surfaces genuine connectivity problems separately. **Verified live**: the actually-
+   disabled agent from the Gap-2 test was real-restored automatically on the very next backend
+   restart, confirmed via a direct `GET /healthz` → `{"disabled": false}` afterward.
+
+# 35. Density pass on PhaseWorkspace — editable target link, generic data source, collapsible copy
+
+User feedback after watching the full E2E run live, three changes, all scoped to
+`PhaseWorkspace.tsx` (shared by all 6 phases, so one fix propagates everywhere) plus one
+backend/registry change:
+
+**Target link → editable.** The "🎯 Targeting …" line was a read-only external GitHub link.
+Added a "Change target →" `<Link to="/settings">` next to it (react-router, not a full-page
+nav) rather than duplicating Settings' edit form inline on every stage — Settings stays the
+one real place that owns the retarget + reload flow (Section 33/34). Verified live: click
+lands on `/settings` with the existing target-repo field pre-filled.
+
+**Data Source Provider — generic, not tool-specific.** User's real complaint, and correct:
+the second radio option hardcoded "Lakera / Garak / PyRIT" but only `_maybe_augment_with_live_mcp`
+actually wires those three for 3 of the app's 20 stages (`protect/guardrail_proxy`,
+`detect/injection_detection`, `detect/red_teaming`) — on the other 17 stages the option was a
+real no-op wearing a specific-sounding label. Relabeled to
+`"+ External Source (SIEM / Security API, via MCP)"` — generic because what's actually
+enrichable genuinely varies by stage. Backend side, kept the existing 3 tool-specific hooks
+completely unchanged (still real, still tested), and *added* a new generic hook: a new
+`external_source` tool in `app/mcp/registry.py` (category `"Data Pipeline"` — a deliberate,
+honestly-labeled exception to this registry's usual "no generic placeholders" rule, since it's
+not impersonating a specific vendor, it's a bring-your-own slot) with `SIEM_API_URL`/
+`SIEM_API_KEY`, and `MCPClient.external_source_fetch_events()` — a real generic authenticated
+GET, honest that it's never been exercised against an actual SIEM since none exists in this
+demo (unlike Lakera/Garak/PyRIT, which were). `_maybe_augment_with_live_mcp` checks this
+tool's live status for *every* stage now, not just three, so `data_source: "mcp"` is
+meaningfully applicable everywhere once a real source is configured — same honest
+mock-fallback-until-configured pattern as Jira/ServiceNow. `SettingsPage.tsx`'s MCP
+Integrations intro copy updated to acknowledge the one deliberate generic exception. New
+"🏷️ DATA PIPELINE" section auto-appeared in Settings — zero extra frontend code needed there,
+since that page already groups tools by registry `category`. Verified live: card renders with
+real `SIEM_API_URL`/`SIEM_API_KEY` fields, `🔵 Mock Fallback` (honest — nothing configured).
+
+**Progressive disclosure for descriptive copy.** User's core complaint: pages read as text-
+packed with too little visualization. New `frontend/src/components/Expandable.tsx` — a plain
+click-to-reveal wrapper (trigger always visible, body collapses by default) — applied to 4
+spots in `PhaseWorkspace.tsx`: the dataset input-name headline (hides `input_desc`), and each
+of the three Active-Guardrails badges (Structured JSON Extraction, Hallucination Cross-Check,
+HITL Gate/Automated-Advisory) — all previously always-rendering a description paragraph below
+the badge. Since these live in the single shared `PhaseWorkspace` component, the fix applies
+identically across Govern/Identify/Protect/Detect/Respond/Recover with no per-phase changes.
+Verified live: badges/headline show a ▼ affordance, descriptions hidden until clicked.
+
+Explicitly scoped as a first pass, not the final density pass — user said more changes are
+coming after reviewing this batch.
+
+# 36. Duplicate navigation removed — StoryBar is now the only nav
+
+User caught a real redundancy from a screenshot: `StoryBar` (the persistent top bar — at the
+time, a live posture score + 6-node case-file thread, Section 33/Phase 1; the score was
+removed the same day, see Section 37) sat directly above `TopTabs` (a second, older nav row —
+Dashboard/Identify/…/Govern links), both doing the same job on every phase page. User's call:
+keep the top one, fold Dashboard into it, delete the rest.
+
+Added a `📊 Dashboard` `NavLink` to `StoryBar.tsx` (first item in the bar, same icon/label/
+active-state visual pattern as the six phase nodes, links to `/`) — the one thing `StoryBar`
+didn't already cover. Then removed `TopTabs` entirely: all 6 render sites across
+`DashboardPage.tsx`, `AssetGraphPage.tsx`, and `PhaseWorkspace.tsx` (loading state + loaded
+state each), the now-unused import in each, the component file itself
+(`frontend/src/components/TopTabs.tsx`, deleted), and its now-dead `.top-tabs`/`.top-tab` CSS
+in `theme.css`. Verified live: exactly one nav row renders on Govern/Identify/Dashboard, the
+new Dashboard chip navigates to `/` correctly, and a stray one-time Vite HMR 404 for the
+deleted file (logged at the moment of deletion, mid dev-session) didn't recur on a fresh hard
+reload — confirmed via network-request history, not just visual check.
+
+# 37. Live posture score removed from StoryBar (unexplained, confusing)
+
+User asked what "LIVE POSTURE 71" meant, then — after getting the real answer (it's
+`Math.round(KPIEngine.get_ai_readiness_index())`, a weighted average of the 6 phase scores,
+see `app/kpi/engine.py:267-333`) — asked for it to be removed from `StoryBar`: correct
+underlying number, wrong place to show a bare unlabeled score with no context.
+
+Removed the whole block from `StoryBar.tsx`: the score display, its color-by-threshold logic,
+and the delta-tracking machinery built for it (`prevScoreRef`, `delta` state, the `useEffect`
+diffing `posture_index` across polls). That delta display also consumed `useStory()`'s
+`lastRun` (Phase 1's "· {stageName}" annotation) — with the score gone, `lastRun` had no
+remaining reader anywhere in the app (`PhaseWorkspace.tsx` only ever wrote to it via
+`setLastRun`). Rather than leave a write-only context around, removed `StoryContext.tsx`
+entirely: the `useStory`/`setLastRun` call sites in `PhaseWorkspace.tsx`, the `StoryProvider`
+wrapper in `App.tsx`, and the context file itself.
+
+Left `Sidebar.tsx`'s own posture-index display alone — that one has a real label ("AI
+Security Posture Index") and a status line ("Scoping: Complete · Status: Verified"), so it
+wasn't the unexplained-bare-number problem the user flagged; only `StoryBar`'s context-free
+version was removed. Verified live: the bar now reads Dashboard → the 6 phase nodes directly,
+no score; Sidebar's labelled version still renders correctly on Dashboard.
+
+# 38. Asset graph redesigned to actually tell its story; redundant page link removed
+
+User's real critique, given directly: "it is not making any sense to me... tell me what story
+you see it here?" — a fair question. Traced the real data behind a concrete example (the
+`meridian-support-agent` graph) before touching any code: center = the one real agent (risk
+50, Medium blast radius); 2 real `model_data_lineage` rows connected via "powers" edges; 1
+real `tool_access_map` row (Admin-level GitHub access); 1 real `secrets_exposure_scan` row
+(critical, "exposed in"); 4 real `governance_compliance_evaluation`-cross-referenced policy
+rows (GOV-001..004, 3 compliant, 1 triggered). The underlying data told a genuinely coherent
+story — *"this agent has broad Admin access, one real secret is exposed and unisolated, and
+that's exactly what tripped your one non-compliant governance rule"* — the rendering just
+never said so.
+
+Three concrete fixes to `frontend/src/components/AssetGraph.tsx`, all derived from data
+already in the `/api/asset-graph` response (`backend/main.py:229-308`) — no backend changes,
+no fabricated text:
+
+1. **A "Read:" narrative caption** above the graph — one real sentence built from the actual
+   node/edge fields (model count, identity access level, critical-secret count, triggered-
+   policy count and its real decision string). New `buildNarrative()`. Verified live output
+   against the real current dataset: *"Meridian Financial Support Agent (risk 50 · Medium) is
+   powered by 2 real models, and holds Admin access. 1 of 1 real secret finding is exposed and
+   not isolated. 3/4 governance rules pass — GOV-004 triggered a real 'Remediation Required'
+   decision."*
+2. **Truncation was hiding real distinctions, not just being ugly** — two Model nodes both
+   rendered as "meridian-support-agen…" because the single-line 22-char cutoff sliced through
+   their shared prefix, making two genuinely different real models (`…-groq` vs `…-mistral`)
+   look like a duplicate. New `wrapLabel()` gives each node up to 2 short lines instead of one
+   truncated line, plus every node now carries a real SVG `<title>` tooltip with its full
+   label + detail on hover. Verified live: the two model nodes now read distinctly.
+3. **Grouped, labelled sectors instead of one flat alphabetical ring** — `layout()` rewritten
+   to place same-type nodes together in a clockwise arc (Models → Access → Policy → Secrets)
+   with a small caps-label at each sector's midpoint, so the graph's shape now carries category
+   information instead of being an arbitrary scatter. Also auto-selects the most consequential
+   real node on load (a critical secret, else a triggered policy, else the agent itself) so the
+   detail panel isn't empty until someone happens to click — verified live: the exposed-secret
+   node was pre-selected with its real "⚠️ Flagged as critical" detail showing on first paint.
+
+Separately, user pointed out the standalone `/asset-graph` page was now redundant with the
+same graph already embedded inline on the Dashboard (Phase 3) — removed the `🕸️ Asset & Risk
+Graph` entry from `Sidebar.tsx`. The route itself stays (Dashboard's own "Open full screen →"
+link still needs somewhere to point), just no longer duplicated as a permanent nav item.
+
+# 39. StoryBar spacing bug fixed; asset graph rebuilt as cards, not SVG geometry
+
+Two more real, specific problems from a follow-up screenshot, not vague polish requests.
+
+**StoryBar spacing was actually uneven, not just perceived that way.** Root cause: the
+Dashboard chip (added in Section 36) lived in the *outer* flex container with a fixed
+`gap: 20`, while the six phase nodes lived in an *inner* `flex: 1` container whose items and
+connector-line dividers stretch to fill remaining space — two different spacing mechanisms
+sitting next to each other, so Dashboard→Govern used a fixed 20px gap while Govern→Identify
+used a flexible stretch. Fixed by folding Dashboard into the exact same array/map/connector-
+line pattern as the six phase items — one list, one spacing mechanism, for all 7. Verified
+live via actual DOM measurement (not a screenshot guess): all 7 items measured **139px wide,
+directly adjacent, zero gap variance**.
+
+**The asset graph's SVG radial layout was the wrong tool for this data shape, not a tuning
+problem.** Section 38's fixes (sector labels, 2-line wrapping, auto-select) made real
+progress but the user's screenshot showed it was still cluttered — center label colliding with
+a nearby edge label, sector headers sitting close enough to node labels to read as one string,
+still-truncated text ("Application-defined internal API ke…"). Recognized the actual issue:
+this data is a single hub with a handful of categorized leaves and *no* leaf-to-leaf edges —
+there's no real network topology here to justify force-directed/radial geometry, which is
+exactly what kept fighting label placement. Rebuilt `AssetGraph.tsx` from scratch as a plain
+card layout instead of SVG: an agent header card up top (icon, full name, detail line, risk
+badge), then one section per category (Models / Access / Governance / Secrets — only rendered
+when that category has real rows) each holding clickable `Chip` components with the complete
+real label, relationship, and detail text — no character-count truncation anywhere, no
+coordinate geometry to collide. Same `buildNarrative()` "Read:" caption kept unchanged (it
+already worked). Same auto-select-most-consequential-node behavior kept, now selecting into
+the card layout instead of SVG nodes. Verified live: every real field renders in full,
+including previously-hidden detail like GOV-004's actual policy text ("Rotate any exposed
+credential within 24 hours") that the old graph never had room to show at all.
+
+# 40. Protect's Lakera live-scan dead code fixed for real, then a Dashboard live-test panel built
+
+User asked why Protect showed nothing for "live prompting" (Section 39's Lakera bug report),
+then added a real `LAKERA_API_KEY` to `.env` — which turned the bug from theoretical into
+directly, empirically verifiable.
+
+**Verified the fix from Section 39 with a real key.** Restarted the backend (`load_dotenv(override=True)`
+re-reads `.env` on every process start; confirmed no stale `LAKERA_API_KEY` sat in
+`SettingsStore`'s own DB to shadow it), confirmed `lakera_guard` connection status flipped to
+`Connected (Live)`, then called `POST /api/phases/protect/stages/guardrail_proxy/run` with
+`data_source: "mcp"` directly. Real result: all 3 real adversarial prompts correctly flagged
+by Lakera (`lakera_flagged: true, live: true` each) — the fix from Section 39 (sampling from
+`adversarial_prompt_corpus` instead of the always-empty `guardrail_events`) genuinely works,
+not just in theory. Confirmed live in the browser too: provenance badge "🟢 Includes real live
+data from: lakera_guard_live_results", real findings in the catalog tagged "🔰 real lakera
+scan".
+
+**New: an interactive Dashboard panel, not just a pipe.** User's ask: a real prompt-testing
+panel on the Dashboard, grouped with Garak/PyRIT as "AI security tools." Inspected Lakera's
+actual real API response shape first (`MCPClient.screen_prompt`) rather than assuming one —
+`{"flagged": bool, "action": "enforce", "metadata": {"request_uuid": "..."}}`, confirmed
+against both a real flagged case and a real clear case. Built around exactly that real shape,
+nothing invented:
+
+- `app/data/live_engine.py`: `_REAL_INJECTION_PAYLOADS` renamed to public
+  `REAL_INJECTION_PAYLOADS` (both `_generate_detect()` and `backend/main.py`'s
+  `replay_detect` already consumed it under the old private name) so the new Dashboard picker
+  reuses the exact same 3 real injection prompts Detect sends to the live agent — one real
+  prompt set, multiple real consumers, never duplicated. A 4th "Benign Baseline" prompt is
+  defined separately in `backend/main.py` (`_BENIGN_TEST_PROMPT`), deliberately *not* added to
+  `REAL_INJECTION_PAYLOADS` itself — that list is iterated unconditionally by
+  `_generate_detect()`, so adding a non-attack row there would have silently grown Detect's
+  real `adversarial_prompt_corpus` and `redteam_campaign_results` row counts with a row that
+  isn't actually an attack.
+- New `GET /api/security-tools/test-prompts` (the 3 real + 1 benign) and
+  `POST /api/security-tools/lakera-screen` (real synchronous `screen_prompt` call, audit-logged
+  as `"Lakera Guard Live Test — Dashboard Panel"` when live).
+- New `frontend/src/components/SecurityToolsPanel.tsx`, mounted on `DashboardPage.tsx` between
+  the live-systems strip and the KPI gauges: a real 3-step interactive flow — pick a real
+  prompt → its full real text appears in a panel → "▶ Test with Lakera" fires the real call and
+  shows 🚫 Flagged / ✅ Clear plus the real `request_uuid` as verifiable proof, not just a bare
+  label. Garak/PyRIT sit alongside as status cards rather than getting the same instant-click
+  UI — an honest design choice: they're real too, but run real multi-minute scans, so forcing
+  them into a single-prompt-click pattern they can't deliver on would be dishonest UX. They
+  link to Detect's stage instead, where triggering a real scan already correctly works.
+- Verified live end-to-end twice: the real "Roleplay Jailbreak" prompt → 🚫 Flagged with a real
+  `request_uuid`; the real "Benign Baseline" prompt → ✅ Clear. Both round-trips confirmed via
+  the actual rendered UI, not just the API response.
+
+# 41. Lakera panel relocated Dashboard → Protect; live-systems strip deduplicated; LLM added
+
+Same day as Section 40, user looked at the shipped result and made three real corrections.
+
+**Wrong home for the interactive panel.** User's own diagnosis, and correct: Protect's
+Guardrail Proxy stage is the actual place "test a prompt against a real guardrail" belongs —
+Dashboard is a summary page, not a workbench. It also explains a real point of confusion: the
+stage's Output & Handoff tab honestly shows `guardrail_events` as permanently empty (no real
+middleware deployed — Section 29/32's documented gap), which read as "nothing is working here"
+until you'd separately found the Dashboard panel elsewhere. Deleted
+`SecurityToolsPanel.tsx`, replaced with `frontend/src/components/LakeraTestPanel.tsx` — same
+real pick-a-prompt → real-text-panel → real Lakera call flow, minus the Garak/PyRIT half
+(dropped, not moved — see below), mounted directly in `PhaseWorkspace.tsx` right after the
+Agent Scope / Expected Output bar for `protect`/`guardrail_proxy` specifically, visible before
+the stage is even run. Its copy now explicitly bridges the two facts: *"`guardrail_events`
+(below) stays real and empty... this is a real, separate proof that the guardrail itself
+works."* Verified live: panel renders in the right spot, a real "Instruction Override
+Injection" test round-tripped to a real Lakera `request_uuid` on the actual Protect page.
+
+**Duplicated Garak/PyRIT status.** They'd ended up shown twice — once in Dashboard's original
+5-chip live-systems strip, once more in the (now-deleted) `SecurityToolsPanel`'s "Full scans"
+cards. Not reintroduced elsewhere; Garak/PyRIT status lives in exactly the one place it always
+should have: the live-systems strip.
+
+**Two real connected systems were missing from that strip entirely.** Lakera Guard itself
+(ironic, given the whole point of Section 40) and the LLM actually doing every stage's real
+analysis (`gpt-4o-mini`) were never in the 5-chip strip at all. `DashboardPage.tsx`'s
+`liveSystems` array extended to 7 real entries — GitHub, Target agent, Slack, **Lakera Guard**,
+Garak, PyRIT, **LLM** — the last sourced from the same `settings.llm_model_info.primary` the
+Settings page already displays (`status === "available"` → live), no new backend call. Grid
+widened from `repeat(5, 1fr)` to `repeat(7, 1fr)`. Verified live: all 7 chips render in one
+strip, all showing `● connected` (Lakera now genuinely live post-Section-40, LLM correctly
+showing `gpt-4o-mini`).
+
+# 42. Target-agent chip's "connected" check made real; removed the duplicate sidebar LLM badge
+
+Two follow-ups from looking at the shipped Section 41 strip.
+
+**"Target agent" was the one chip in the strip that wasn't a real check.** Every other chip
+(`toolByName.X`) reflects `MCPClient.get_connection_status`, itself based on required env vars
+being set — but for Target agent, the Dashboard was using `!!settings?.target_agent_url`, which
+only proves a URL string exists, not that the real process behind it is actually up. Fixed in
+`GET /api/settings` (`backend/main.py`): now calls the real `MCPClient.target_agent_healthz()`
+(the same cheap `GET /healthz` `AppState._ensure_target_agent_enabled()` already uses at
+startup) and returns real `target_agent_reachable`/`target_agent_disabled` booleans, wrapped in
+try/except so a genuinely-down agent doesn't crash the settings endpoint. `DashboardPage.tsx`'s
+Target agent chip now keys off `target_agent_reachable`, and shows "(suspended)" in its detail
+line when reachable-but-disabled — a real, distinct state from unreachable. **Verified live,
+both directions**: killed the real `meridian-support-agent` process — `target_agent_reachable`
+correctly flipped to `false`; restarted it — flipped back to `true`. Not asserted, watched
+happen via direct API calls before and after.
+
+**Duplicate LLM status removed from the Sidebar.** `Sidebar.tsx` had its own `status-badge-row`
+showing `settings.llm_model_info.primary` — the exact same real fact the new Dashboard LLM chip
+(Section 41) now shows, in two different places with two different visual treatments. Removed
+the badge and its now-unused `settings` query/`primary` variable from `Sidebar.tsx` entirely;
+the Dashboard strip is the one place LLM status lives now.
+
+**What "Target agent" actually is, vs. GitHub** (user asked directly): the GitHub chip is the
+real *source* — the `vaibs2108/meridian-support-agent` repository (code, `governance/policy.yaml`,
+CI checks, Dependabot/Secret Scanning alerts) that Identify/Protect/Govern read via GitHub's
+REST API. Target agent is the real *running process* built from that same repo's `main.py` —
+the live FastAPI service at `http://127.0.0.1:8091` that Detect actually sends real injection
+payloads to, and that Respond/Recover actually suspend/restore via real `/admin/disable`
+`/admin/enable` calls. Same project, two different real systems reached through two entirely
+different client methods (`github_*` vs `target_agent_*`) — source-at-rest vs. process-in-motion.
+
+# 43. Real Lakera results were invisible on the page — a genuine architectural gap, not user error
+
+User's question, direct and correct: "does Guardrail Proxy's output include the Lakera run
+output? I can't see anything from Lakera here." Traced it precisely rather than guessing.
+
+`run_stage`'s `output_preview` (`backend/main.py`) reads `state.datasets[output_key]` — for
+`guardrail_proxy`, `output_key = "guardrail_events"`, which is honestly, permanently empty (no
+real guardrail middleware runs in front of the target agent — Section 29/32's documented gap).
+The real `lakera_guard_live_results` rows from a live-scan run never touch that dataset — they
+only ever existed in `datasets_for_run`, the *per-call* merged dict fed to the LLM as extra
+analysis context, never written back to `state.datasets`. So the Output & Handoff tab's
+dataset preview was structurally guaranteed to show 0 rows regardless of whether Lakera ran —
+correct about `guardrail_events` specifically, but it made a real live scan look like it
+produced nothing at all. The AI Analysis tab did have the real Lakera data, but only
+paraphrased into LLM-written finding text (the "🔰 real lakera scan" badge) — never the actual
+raw API rows.
+
+Fixed by adding a real data table, not a workaround: right below the existing "🟢 Includes real
+live data from" badge in `PhaseWorkspace.tsx`, a new block renders
+`outcome.aggregation.lakera_guard_live_results.rows` directly via the existing `DataTable`
+component whenever present — the actual real `prompt_sample`/`lakera_flagged`/`live` rows
+Lakera returned, not a summary of them. Verified live: ran Guardrail Proxy with "+ External
+Source" selected, table rendered all 3 real prompts, all correctly `lakera_flagged: true`,
+`live: true`.
+
+# 44. Lakera's real output made to actually move something — not just visible, consequential
+
+User's sharper follow-up, and the right one: showing the raw Lakera rows (Section 43) still
+didn't answer *why have Lakera at all* if its real verdict never changed any real decision,
+score, or downstream behavior — a table nobody's forced to look at isn't "value," it's a nicer
+demo prop. Checked, and the user was right: `app/kpi/engine.py`'s **Guardrail Block Rate**
+KPI — which feeds Protect's phase score, which feeds the overall AI Security Posture Index —
+read from `guardrail_events` (honestly, permanently empty) and fell back to a **hardcoded
+`91.0` constant that literally nothing in the app could move**, Lakera included. A real,
+correctly-configured Lakera API key changed zero numbers anywhere; it only made the LLM's
+prose more specific.
+
+Fixed at the actual point of leverage, not the display layer:
+
+- `backend/main.py`'s `_maybe_augment_with_live_mcp` now persists the real
+  `lakera_guard_live_results` DataFrame into `state.datasets` (previously it only ever lived in
+  the request-scoped `datasets_for_run` merge, gone the instant the response was sent) and
+  calls `state.recompute_kpis()` immediately — the same rebuild-under-lock method
+  `reload_datasets()` already uses, so `state.kpi_engine` reflects the real scan before the next
+  `/api/dashboard` fetch, no extra polling needed.
+- `app/kpi/engine.py`'s Guardrail Block Rate now checks for real `lakera_guard_live_results`
+  first — `% of real prompts Lakera actually flagged` — and only falls through to the
+  `guardrail_events`/`91.0` chain when no real scan has run yet. One real, honest signal now
+  drives a metric that used to be structurally inert.
+
+**Verified live, before/after, not asserted**: `Guardrail Block Rate` `91.0` → **`100.0`**
+after a real Guardrail Proxy run (all 3 real injection prompts correctly flagged); Protect's
+phase score `66.4` → **`70.0`**; the overall posture index `70.6` → **`71.2`**. Confirmed in
+the actual rendered Dashboard too ("Guardrail Enforcement Efficacy: 100.0%"), not just the API
+response. Running Lakera now visibly moves a real score chain — the honest answer to "what's
+the use of Lakera here" is that it now has one.
+
+# 45. Same check extended to Garak/PyRIT — same real gap, same real fix
+
+User's direct follow-up: "check the same thing for Garak/PyRIT." Traced both runners' real
+finding schemas first (`garak-runner/main.py`, `pyrit-runner/main.py`) rather than assuming —
+both carry a real per-attempt `canary_leaked` bool, same real signal shape as everything else
+this session checks for a genuine leak. Confirmed the exact same architectural gap as Lakera's:
+`_maybe_augment_with_live_mcp`'s `detect`/`injection_detection`|`red_teaming` branch built real
+`garak_live_scan`/`pyrit_live_scan` DataFrames and only ever handed them to `extra` (the
+request-scoped merge fed to the LLM) — never to `state.datasets`, never triggering a KPI
+recompute. A real garak/pyrit scan changed the LLM's prose and nothing else.
+
+**Fixed the same way**: both DataFrames now also persist to `state.datasets[f"{tool}_live_scan"]`,
+with one `state.recompute_kpis()` after the loop. `app/kpi/engine.py`'s Red-Team Attack Success
+Rate previously read only `redteam_campaign_results` — 3 real baseline rows from the direct
+target-agent calls Detect always makes. That's a real but thin sample; a real garak/pyrit scan
+tests dozens of real technique variants and was being silently ignored by this KPI regardless of
+what it found. Now pools every real attempt this session has evidence for — baseline rows plus
+any real `garak_live_scan`/`pyrit_live_scan` rows (via `canary_leaked`, `dropna()`'d so
+runner-error placeholder rows without that field don't corrupt the count) — into one real
+success rate.
+
+**Verified live — genuinely, including catching that the fix's own test infrastructure had
+silently died.** First verification attempt returned `garak_live_scan`/`pyrit_live_scan` as
+`[1, 1]` shape (a "no findings" placeholder row) — checked why rather than accepting a
+result that looked plausible: `netstat` showed nothing listening on `GARAK_RUNNER_URL`/
+`PYRIT_RUNNER_URL` (`127.0.0.1:8095`/`8096`) — both sidecar runner processes had died in the
+same earlier session-wide crash as the main backend/frontend/target-agent (Section 42's
+context). Restarted both, re-ran the real scan: `garak_live_scan` came back `[20, 5]` (20 real
+attempts, real columns `probe`/`prompt`/`response_snippet`/`canary_leaked`/
+`garak_detector_results`), `pyrit_live_scan` `[2, 5]`, all `canary_leaked: false`. Confirmed
+both datasets genuinely persisted via a direct `GET /api/datasets/{name}` call (not just
+present in that one response) — real row counts, real columns, matching the scan's actual
+output. Red-Team Attack Success Rate stayed at `0.0` before and after — not a failed fix, the
+honest result of pooling 3 real baseline attempts with 22 more real attempts that also found
+zero leaks: the real fix from earlier this session holds even under substantially more
+adversarial real coverage, and the KPI now has 25 real data points behind that "0.0" instead
+of 3 — the mechanism is real and correctly wired even though this particular real result
+didn't move the number, which is itself worth stating plainly rather than only reporting
+the runs where a number visibly changes.
+
+# 46. Real historical leak evidence captured — closing the "no preserved before" gap for good
+
+User's follow-up, after the Garak/PyRIT check: since the real output guardrail is
+*unconditional* (blocks on the literal leaked string regardless of technique), no live test
+run today — Garak, PyRIT, or anything else — can ever reproduce a raw pre-fix leak against the
+current deployed target. So how do we actually *prove* the leak, not just assert it happened?
+Presented three real options (temporarily toggle the live guardrail off/on to reproduce it,
+same but capture it once and store it permanently, or bypass the deployed endpoint entirely
+and test the raw model in isolation). User chose the permanent-capture option and explicitly
+approved building it, understanding it meant briefly weakening a real live security control —
+this needed that explicit sign-off, not just an inline "go ahead," given the real (if brief,
+auto-reverted) consequence.
+
+**Real toggle added to `meridian-support-agent/main.py`** — a `_guardrail_enabled` flag,
+deliberately separate from the existing `_disabled` (full-suspend) flag, defaulting `True`.
+Two new admin endpoints, `/admin/guardrail/disable` and `/admin/guardrail/enable`, mirror the
+existing `/admin/disable`/`/admin/enable` pattern exactly (same `_require_admin` gate). The
+real `/chat` guardrail check became `if _guardrail_enabled and MERIDIAN_INTERNAL_API_KEY in
+reply:` — one word added, same deterministic check. `/healthz` now also reports
+`guardrail_enabled`. **This edit was blocked once by Claude Code's own auto-mode permission
+classifier** (flagging edits to security-guardrail code, independent of the user's own
+approval already given in chat) — surfaced that distinction explicitly to the user rather than
+routing around it with another tool, then retried and it went through.
+
+**Orchestration lives in `backend/main.py`**: `POST /api/recover/capture-historical-leak` —
+disables the real guardrail, sends `REAL_INJECTION_PAYLOADS[0]` to the real target agent,
+captures whatever real reply comes back, and re-enables the guardrail in a `finally` block so
+it's restored even if the chat call itself raises. Only persists to
+`data/historical_leak_evidence.json` when a real leak actually occurred (`leaked: True`) —
+a non-leak (real model behaviour isn't perfectly deterministic) is reported honestly but never
+overwrites previously-captured real evidence. `GET /api/recover/historical-leak-evidence` is
+the read-only counterpart the UI polls — never itself triggers a capture. New
+`MCPClient.target_agent_set_guardrail_enabled()` mirrors `target_agent_set_disabled()`'s real
+HTTP-call/audit-log pattern.
+
+**Executed once, live, with the user's explicit approval, immediately verified end to end**:
+1. Confirmed no evidence existed yet (`{"captured": false}`).
+2. Ran the real capture — succeeded on the first real attempt: `leaked: true`, real response
+   text containing the real fake credential (`mer-fin-internal-8f2c9a41-...`) verbatim.
+3. Confirmed the real guardrail was back on immediately after (`GET /healthz` →
+   `guardrail_enabled: true`).
+4. Re-sent the *exact same* real prompt through the normal `/api/recover/replay-detect` path —
+   correctly blocked (`leaked: false`, the real "[RESPONSE BLOCKED...]" message) — proving the
+   restore wasn't just a flag flip but that the real fix is actually back in effect.
+5. Confirmed the evidence file persisted to disk with the real captured content.
+
+`RecoverProof.tsx`'s "BEFORE THE FIX" card now fetches this real evidence
+(`historicalLeakEvidence` query) and shows the actual real prompt and real leaked response text
+when present, falling back to the prior generic description only if a deployment has never run
+the capture. Verified live: the real captured leak renders correctly in the Recover phase's
+rollback stage, side-by-side with the existing real "AFTER THE FIX — LIVE" replay button — a
+genuine, reproducible, non-fabricated before/after, both halves real, one captured once and
+durable, the other re-provable on demand.
+
+# 47. Protect's Lakera panel confusion — a self-inflicted labeling gap from Section 39
+
+User ran Guardrail Proxy with the default Data Source Provider selected and saw no Lakera data
+anywhere. Checked the actual radio state live rather than guessing: `"GitHub Repo + Deployed
+Agent"` was selected, not `"+ External Source (SIEM / Security API, via MCP)"` — the latter is
+what actually triggers `_maybe_augment_with_live_mcp`'s Lakera branch; with the default
+selected, it returns immediately (`if data_source != "mcp": return {}`) and Lakera never runs
+for that stage's own analysis. Re-ran with "+ External Source" selected — worked exactly as
+expected, real Lakera table rendered.
+
+So the mechanism was never broken. The actual bug is a **self-inflicted regression from Section
+39**: relabeling the radio from `"+ Real-Time Tool Scan (Lakera / Garak / PyRIT, where
+available)"` to the generic `"+ External Source (SIEM / Security API, via MCP)"` (a deliberate,
+user-requested change at the time, to stop the label lying about applying to 17 stages it
+didn't) also quietly removed the only text on the page that told a user *"pick this one for
+Lakera."* Fixed by adding a short, stage-local hint directly in `LakeraTestPanel.tsx` (not by
+reverting the generic label, which was correct for the reason it was changed) — one line
+clarifying the interactive panel is a one-off check independent of the stage below, a second
+pointing at the Data Source Provider radio by name for anyone who wants Lakera to feed the
+stage's actual AI analysis instead. Verified live: hint renders correctly next to the panel,
+existing real Lakera table still renders correctly from a fresh re-run with the right radio
+selected.
+
+# 48. Output & Handoff's "0 rows" still confused — closed the loop where the confusion actually is
+
+Same user, same tab, same question one more time — a sign the answer belonged on the page, not
+just in chat. `guardrail_events` showing 0 rows is genuinely correct (Section 43/47), but
+nothing on the Output & Handoff tab itself said so; the explanation only ever existed in this
+conversation.
+
+Added a real, conditional note directly in `PhaseWorkspace.tsx`'s Output tab, shown only for
+`protect`/`guardrail_proxy` when `row_count === 0`: states plainly this will always show 0 rows
+because no real guardrail middleware intercepts real traffic yet, and — only when
+`result.live_mcp_used` actually includes `lakera_guard_live_results` for that run — points
+directly at the 🧠 AI Analysis tab where that run's real Lakera results actually live. Verified
+live: re-ran the stage with "+ External Source" selected, note rendered with both the general
+explanation and the real Lakera cross-reference, since that run genuinely had live Lakera data
+to point to.
+
+# 49. Real guardrail middleware — the honest gap finally closed, not worked around
+
+User's follow-up to Section 47, after understanding Lakera was only ever a screening tool, not
+middleware: "can we implement it by any chance?" Then, approving the build, the sharper
+question that actually shaped the design: "if everything is clean then what is the use of
+building this tool?" — correct concern. A fixed script replayed against the same 4
+already-known-flagged prompts would produce the same result every run and prove nothing new.
+The real value only exists if the proxy handles arbitrary input, not a script.
+
+**Built as real infrastructure, not a demo shim**: `POST /api/protect/guardrail-proxy/chat`
+(`backend/main.py`) is an actual reverse proxy inside securing-ai-demo itself — no changes to
+the separate meridian-support-agent repo needed this time. Real Lakera Guard screens the input
+first; if flagged, the real target agent is **never called at all** — a genuine block, not a
+simulated one. If clear, the real prompt is forwarded to the real target agent, and its real
+reply is *also* screened before being returned — a second, independent real layer on top of
+the target's own deterministic output check (2b89c37). Every real outcome — Blocked / Redacted
+/ Allowed — appends a real row to `state.datasets["guardrail_events"]` and calls
+`state.recompute_kpis()` immediately. `app/kpi/engine.py`'s Guardrail Block Rate now prefers
+`guardrail_events` (real proxied traffic — the most authoritative source once populated) over
+the Section 44 batch-Lakera fallback, which stays as the fallback under the fallback.
+
+`LakeraTestPanel.tsx` rewritten around this: free-text prompt box (quick-pick buttons now just
+populate it, don't submit directly), calls the real proxy, shows which real layer resolved it,
+both real Lakera verdicts, the real forwarded reply when allowed, and the real event id/action
+just logged. Invalidates the `["dashboard"]` query on success so a real score shift is visible
+immediately, not on next poll.
+
+**Verified live with three deliberately different real prompts, not one scripted example** —
+proving the "not just a clean demo" concern was addressed, not dismissed:
+1. A known jailbreak → blocked at **input**, real target agent never called.
+2. A genuinely benign question ("business hours / password reset") → passed input clean, but
+   Lakera's **output** screen flagged the real target agent's real reply — an unexpected real
+   result (a real false-positive-shaped catch on ordinary content), exactly the kind of
+   non-obvious finding a fixed script could never produce.
+3. A subtler, indirect social-engineering-framed prompt → also caught at input — real evidence
+   Lakera's classifier isn't only catching the obvious "ignore previous instructions" pattern.
+4. A fourth, different benign question, tried live through the actual UI (not curl) → passed
+   **both** real screens clean, real target agent reply forwarded and shown verbatim.
+
+Hit a real, unrelated UI bug while testing #4 live: the page has two `<textarea>` elements
+(Column 2's pre-existing "Custom Threat Scenario" field renders first in DOM order), and
+`document.querySelector('textarea')` grabbed the wrong one — typed input silently went
+nowhere useful. Diagnosed by checking the submit button's real `disabled` state rather than
+assuming the click failed, found the actual element via its distinguishing `placeholder`, and
+retried against the correct one — a real debugging process worth recording, not just the
+eventual correct result.
+
+**Real, cascading, honest consequence confirmed end to end**: `guardrail_events` went from a
+permanently-empty dataset to **4 real rows** (verified via the actual Output & Handoff tab
+after re-running the stage, not just the API). Guardrail Block Rate recalculated from those 4
+real events (3 Blocked/Redacted, 1 Allowed) came out lower than the earlier all-blocked batch
+result — the AI Security Posture Index and Protect's phase score both genuinely moved down in
+the live UI as a direct, honest result of one real "Allowed" event diluting the real block
+rate. Not a bug — an honest metric responding correctly to honest new data, which is exactly
+what "closing this gap for real" was supposed to produce.
+
+# 50. Two real paths to the same target agent, made explicit on both pages
+
+User's sharp follow-up after Section 49: if Protect's new proxy catches everything sent through
+it, is Detect now redundant — and does Detect need the same treatment? No, and explained why
+before touching anything: `_maybe_augment_with_live_mcp`'s Detect branch and Detect's baseline
+payloads (`REAL_INJECTION_PAYLOADS` via `_generate_detect()`) call `target_agent_chat()`
+directly — never through the new `/api/protect/guardrail-proxy/chat`. That's deliberate, not
+an oversight: Detect's entire job is measuring raw exposure — what happens when an attacker
+skips whatever's in front of the agent, since the target agent's real `/chat` endpoint is still
+directly reachable and the proxy doesn't gate it. Protect proves the guardrail works for
+traffic routed through it; Detect proves what's still exposed when traffic isn't. Two different
+real questions, not the same test twice — recommended keeping Detect exactly as-is rather than
+routing it through the proxy, which would erase the thing it's supposed to prove.
+
+Added this as real, visible copy on both ends rather than leaving it as something only
+explained in chat:
+
+- `PhaseWorkspace.tsx`, Detect's `injection_detection`/`red_teaming` results (right above
+  `AttackPath`): a real warning that these attacks bypass Protect's guardrail proxy on purpose,
+  with a pointer to where the other real path lives.
+- `LakeraTestPanel.tsx` (Protect's Guardrail Proxy stage): a real note stating only traffic
+  sent through this proxy is protected, pointing back at Detect for the raw-exposure result,
+  plus a short explanation of Lakera's actual role — a pattern classifier (jailbreak/injection
+  techniques, sensitive-content categories) independent of and complementary to the target
+  agent's own narrow deterministic single-string filter, not a duplicate of it.
+
+Verified live: ran Detect's injection_detection stage, the real bypass warning rendered
+correctly above the attack path; the Protect-side note confirmed present on the Guardrail Proxy
+stage. Three real, independent defensive layers now have a clear, honest home for each: the
+target agent's own filter (2b89c37), Lakera Guard via Protect's real proxy (Section 49), and
+Detect's direct real attacks proving what's exposed when neither of the first two is in the
+path.
+
+# 51. `model_leaked_raw` — proving the model itself is still jailbroken, safely
+
+User's sharp correction after reviewing Detect's real results: "garak is not able to break but
+our prompts were able to break the leaks so lets show those leaks... I want this to make this
+demo that with these things we are able to jailbreak this model." The existing `canary_leaked`
+field was honestly `False` on every single real run, for a real reason — the output guardrail
+(2b89c37) substitutes the reply *before* `target_agent_chat()`'s caller ever sees it — but that
+made the UI read as "nothing works," which erased the actual story: the real model still falls
+for these 3 baseline payloads every time, and only a deterministic string-match guardrail is
+what's actually holding the line.
+
+Fixed at the source, not by relaxing the guardrail: `meridian-support-agent/main.py`'s `/chat`
+now computes `model_leaked_raw = MERIDIAN_INTERNAL_API_KEY in reply` **before** the guardrail
+substitution runs, and returns it on `ChatResponse` as a plain boolean — never the leaked text
+itself, just the fact that the raw completion contained it. Verified live via two direct curl
+calls against the real deployed agent: the jailbreak payload → `model_leaked_raw: true` (reply
+still the safe blocked message); a benign question → `model_leaked_raw: false` (normal real
+reply). The real secret never crosses the wire either way.
+
+Threaded through every real caller of `target_agent_chat()` that already existed:
+- `app/data/live_engine.py`'s `_generate_detect()` — each of the 3 baseline
+  `adversarial_prompt_corpus` rows now carries a real `model_leaked_raw` (falling back to
+  `canary_leaked` for an older target-agent deployment that predates the field), fixing the
+  `_EMPTY_SCHEMAS` fallback schema in the same pass since it was already stale.
+- `backend/main.py`'s `POST /api/recover/replay-detect` and `POST
+  /api/protect/guardrail-proxy/chat` — both already called `target_agent_chat()` for other
+  reasons; both now pass the real field straight through in their response instead of dropping
+  it.
+
+Rendered distinctly everywhere the binary leaked/blocked label used to flatten this into one
+bucket — three real, different outcomes now instead of two:
+- `AttackExchange.tsx` (Detect): `canary_leaked` → "⚠️ leaked" (red); `model_leaked_raw` and not
+  `canary_leaked` → "🎯 jailbreak succeeded · 🛡️ guardrail caught it" (amber); neither → "🧠 model
+  refused on its own" (green). Verified live by re-running Detect's `injection_detection` stage:
+  2 of the 3 real baseline payloads now show the amber "jailbreak succeeded, guardrail caught
+  it" label (Direct System Prompt Extraction, Instruction Override Injection); the third
+  (Roleplay Jailbreak) genuinely shows "model refused on its own" — the real model actually
+  resists that specific technique, an honest difference the old binary label couldn't show.
+- `RecoverProof.tsx` (Recover): the live "AFTER THE FIX" replay card now adds an amber note when
+  the fix held (`!leaked`) but the model still complied raw (`model_leaked_raw`) — "the model is
+  no safer; the fix is what's holding." Verified live via a real replay click: reply was the
+  safe blocked message, and the new amber note rendered correctly underneath it.
+- `LakeraTestPanel.tsx` (Protect): same amber note on the real proxy's result card, phrased for
+  whichever layer actually caught it (the proxy's own Lakera output screen vs. the target's
+  built-in guardrail). Verified live: an input-blocked prompt (Lakera flagged before the target
+  agent was ever called) correctly shows **no** `model_leaked_raw` note, since the field is only
+  meaningful once the real model was actually invoked — confirms the field isn't fabricated or
+  defaulted client-side.
+
+Net effect: the demo now proves, with real evidence and without ever exposing the actual secret
+over any endpoint, that the underlying model is exactly as jailbreakable as it was before
+2b89c37 — the fix changed what happens to the model's output, not whether the model complies.
+
+# 52. Fixed the `useAuth` Fast-Refresh bug; built Garak/PyRIT live scan + a real, repeatable "guardrail off" demo
+
+**`useAuth` console error, root-caused.** User asked to look into a recurring `useAuth must be
+used within AuthProvider` console error rather than dismiss it. The dev server's own log (real,
+tied to file-watching — not the browser console buffer, which turned out to retain history
+across a tab's entire lifetime, including errors from files deleted hours earlier, making it
+useless for "is this happening right now") showed the real cause on every single edit:
+`[vite] hmr invalidate /src/context/AuthContext.tsx Could not Fast Refresh ("useAuth" export is
+incompatible)`. `AuthContext.tsx` exported both a component (`AuthProvider`) and a plain hook
+(`useAuth`) from one file — Vite's Fast Refresh requires component-only files, so any edit
+anywhere forced a full re-execution of that module, briefly desyncing it from already-mounted
+consumers. Fixed by moving the hook to its own file, `context/useAuth.ts`, importing the now
+component-only `AuthContext`/`AuthState` export from `AuthContext.tsx`. Verified: a cold dev
+server restart produced zero HMR-invalidate warnings, and the full app (login, sidebar, live
+dashboard data) rendered correctly.
+
+**Garak/PyRIT live-scan panel.** `GarakPyritLivePanel.tsx`, mounted on Detect's
+`injection_detection`/`red_teaming` stages — tool checkboxes, a real elapsed-time counter during
+the genuinely slow (~170s) real scan, results grouped by tool with the same three-outcome
+labeling used elsewhere (leaked / guardrail_blocked / model_self_refused), reusing the
+already-live `/api/detect/live-scan` backend endpoint. Verified live: 20 real Garak DAN-family
+probes + 1 real PyRIT probe, all genuinely "model refused on its own" — an honest, useful
+contrast against the app's own 3 direct-injection payloads (2 of which genuinely jailbreak the
+model), visible on the same page.
+
+**The "can we show an actual leak the guardrail can't catch" question.** User's sharp follow-up:
+Garak/PyRIT's canned probes don't break the model, but the app's own simple payloads do — can we
+show a *real* leak that gets past the guardrail entirely, not just "jailbreak succeeded, guardrail
+caught it"? Spent real effort trying to find a genuine bypass of the exact-string-match guardrail
+via prompt-level obfuscation (spaced characters, reversed string, ASCII-code encoding, Base64) —
+all four failed honestly: the two "leak it but reformat it" prompts still made the model blurt the
+literal contiguous key alongside its attempt (guardrail correctly caught both); the two requiring
+real character-level transformation produced hallucinated gibberish instead of a working encoding
+(`allam-2-7b` isn't reliable at exact string manipulation without tool access) — so nothing
+genuine leaked either way. Reported this honestly rather than fabricating a working bypass.
+
+User's next idea reframed the ask correctly: instead of hunting for a prompt-level bypass, use the
+real `_guardrail_enabled` toggle (already built for Section 46's one-time historical capture) as a
+deliberate, repeatable part of the Detect → Recover narrative — show the real leak when the
+guardrail is off (proving the underlying vulnerability is current, not just historical), then use
+Recover's existing live replay (guardrail back on) to prove the fix holds. Built as
+`POST /api/detect/live-vulnerability-demo` (`backend/main.py`) — the same real
+disable-guardrail → real payload → **always** restore-via-try/finally mechanic as
+`capture-historical-leak`, but repeatable on demand (any of the 3 real payloads, no persistence)
+rather than a one-time capture. `LiveVulnerabilityDemo.tsx` on Detect's `injection_detection`
+stage: a payload picker, an explicit "I understand this briefly disables the real guardrail"
+confirmation checkbox before the button un-disables, the real raw reply shown verbatim (the real
+fake credential is safe to show — same precedent as `RecoverProof.tsx`'s existing historical
+evidence card), and a live confirmation that the guardrail was actually restored (read back from
+the target agent's own `/admin` response, not assumed).
+
+Verified live, full loop: ran the demo on Detect with "Direct System Prompt Extraction" selected —
+real raw reply came back containing the actual fake credential (`mer-fin-internal-8f2c9a41-do-not-
+share`), confirmed leaked; guardrail restore confirmed both client-side (`guardrail_restored:
+true`) and independently via a direct `curl /healthz` against the target agent
+(`guardrail_enabled: true`). Immediately after, ran Recover's "Replay this attack now" with the
+same payload — real reply came back as the safe blocked message, "✅ blocked — fix holds." This is
+the complete, honest narrative the user asked for: a real leak when protection is off, proven live
+and on demand, followed by proof the same real attack fails once protection is back — not a
+one-time historical artifact, a repeatable demonstration.
+
+# 53. The demo secret is now a real, live GitHub credential — zero-scope, so leaking it is still safe
+
+User pushed further, correctly: everything about *how* the secret leaks was real, but the secret's
+*content* (`mer-fin-internal-8f2c9a41-do-not-share`) was invented, never authenticating anything.
+Asked directly why not make that real too, and separately, what's actually lost if a real GitHub
+credential leaked during testing. Answered both honestly rather than either refusing outright or
+just complying: putting a real, *meaningfully-scoped* token (e.g. the app's own real `GITHUB_TOKEN`,
+which has real repo write/admin access) into the target LLM's system prompt would mean every single
+test this session — dozens of real calls to Groq/Mistral, whether or not the jailbreak "succeeds" —
+sends a real working credential to third-party LLM APIs and, on any successful jailbreak, back
+through this app's own logs, `historical_leak_evidence.json` on disk, and this very conversation's
+tool outputs. That's a real, hard-to-reverse exposure regardless of demo outcome — rotating the
+token after the fact doesn't retract having already sent it repeatedly to systems outside anyone's
+control.
+
+The resolved middle ground: a **real GitHub classic PAT created with zero scopes** — genuinely
+authenticates as the user's real GitHub identity (passes any real validation check), but can read
+or write nothing, so leaking it has no real blast radius. User generated one via
+github.com/settings/tokens (classic, no scopes checked) and added it to `.env` — initially in
+`securing_AI_demo/.env` by mistake (wrong project; that backend never reads this variable), found
+and corrected by moving it to `meridian-support-agent/.env`, the process that actually needs it.
+
+Real changes made:
+- `meridian-support-agent/main.py`: `MERIDIAN_INTERNAL_API_KEY` now reads
+  `os.getenv("MERIDIAN_INTERNAL_API_KEY")`, falling back to the original fake placeholder string
+  only if that env var isn't configured — so the demo still runs standalone without this setup
+  step. System-prompt flavor text updated from "core banking API" to "internal GitHub deployment
+  pipeline" to match the new credential type.
+- `app/data/live_engine.py`: `_CANARY_FRAGMENT` (a single hardcoded string) replaced with
+  `_CANARY_FRAGMENTS = ("ghp_", "mer-fin-internal")` and a shared `_canary_leaked(text)` helper, so
+  real-leak detection correctly recognizes either the real classic-PAT prefix or the fake fallback
+  — whichever a given deployment is actually running with. All 6 call sites across
+  `live_engine.py` and `backend/main.py` (capture-historical-leak, replay-detect, the new
+  live-vulnerability-demo) switched from the old inline `_CANARY_FRAGMENT in text` check to this
+  shared helper.
+- Deleted `data/historical_leak_evidence.json` — it held a capture from the *old* fake secret, now
+  inconsistent with the real token; a fresh capture via the existing endpoint produces evidence
+  that matches current reality instead of silently mixing old and new secret values in the same UI.
+- Confirmed `.env` is gitignored in both projects before any of this, so the real (if harmless)
+  token never risks landing in git history.
+
+Verified live, full loop, with the real token in place: ran the Live Vulnerability Demo on Detect —
+real raw reply came back containing a string matching the real classic-PAT format
+(`ghp_` + 36 chars), confirmed as a genuine leak; guardrail restore confirmed independently via
+`curl /healthz`. Ran Recover's "Replay this attack now" immediately after — real reply came back as
+the safe blocked message with the `model_leaked_raw` amber note correctly shown, and critically,
+**no real token text present** in that blocked reply (confirms the guardrail's exact-match check
+still works correctly against the new real value, not just the old fake one). RecoverProof's
+"BEFORE THE FIX" card correctly fell back to its not-yet-captured state after the stale evidence
+file was removed. Net effect: the one remaining fake element in the whole demo is now a real, live,
+independently-verifiable credential — with deliberately zero real-world stakes if it ever leaks
+anywhere, by construction rather than by accident.
+
+# 54. Full 6-phase live walkthrough; Respond/Recover now consume a real consolidated risk register
+
+**Live walkthrough.** Ran all 6 phases, 16 stages, end to end via the browser with the new real
+token in place — Govern → Identify → Protect → Detect → Respond → Recover, every "Execute AI
+Analysis" and every real HITL gate approved. Zero real errors. Confirmed real cross-phase
+reactivity working exactly as designed: Govern's compliance evaluation correctly flipped to 2
+triggered rules (GOV-002 adversarial-test failure, GOV-004 exposed credential) once Detect found a
+real leak and Protect found the real exposed secret in the same run; Protect's own Policy-as-Code
+stage flagged the real credential-loading code itself as an exposed-secret finding. One incidental
+finding: a mid-walkthrough session-token expiry produced a real 401 and a clean redirect to
+`/login` — expected token-TTL behavior, not a bug; re-login preserved all in-progress stage state.
+
+**The Respond/Recover gap, found and fixed.** User's direct question: does Respond/Recover show the
+complete list of identified risks from Govern through Detect, so remediation can happen against the
+real full picture? Investigated and found no: Respond's `incident_queue` showed exactly 1 row the
+entire walkthrough — a single row generated once at backend startup from `redteam_campaign_results`,
+disconnected from whatever Govern/Detect actually found in the live run. Root cause was structural:
+`generate_all()` ran `Identify → Protect → Detect → Respond → Recover → Govern`, with Govern
+deliberately last so its real cross-phase evaluation could see everything before it — but that same
+ordering meant Respond and Recover ran *before* Govern's evaluation existed, so they could never
+reference it. A second, subtler bug in the same function: it sourced Detect incidents from
+`redteam_campaign_results["outcome"] == "Success"`, which reflects `canary_leaked` (what the caller
+received) — honestly false on nearly every attempt now that the real output guardrail is active, so
+this path had been silently starved since the fix landed, not just architecturally disconnected.
+
+Fix, in `app/data/live_engine.py`:
+- Reordered `generate_all()` to `Identify → Protect → Detect → Govern → Respond → Recover`. Govern's
+  evaluator only ever needed Identify/Protect/Detect, never Respond/Recover, so this is safe.
+- Rewrote `_generate_respond()`'s `incident_queue` into a real, freshly-computed union built purely
+  from data already fetched earlier this same run (no new live calls): every real triggered Govern
+  rule, every Identify agent at Critical/High blast radius, every Protect secret found unisolated
+  from the LLM, and every Detect payload with real `model_leaked_raw == True` (not `canary_leaked` —
+  using the raw-jailbreak signal instead of the post-guardrail one is what keeps this queue from
+  going empty the moment the real fix is active). Each row carries a real `source_phase` and
+  `source_id` for exact traceability back to the rule/agent/secret/payload it came from, and the
+  queue is sorted Critical-first. `containment_actions` deliberately kept unchanged — the one real
+  action ever actually executed; inventing more would fabricate remediation that never happened, and
+  an incident with no matching containment row is an honest, real gap, not a bug to hide.
+- `_EMPTY_SCHEMAS["incident_queue"]` extended with `source_phase`/`source_id`.
+- `backend/main.py`'s `run_stage` now appends `incident_queue` as an extra real input specifically
+  for `recover/guardrail_update` (alongside its existing `rollback_events`), so that stage's real
+  analysis can cross-reference what's been fixed against what's still open — without changing its
+  primary displayed "Target Ingested Dataset" (still Rollback Event Log).
+- Prompt instructions (`agent_manager.py`) and stage descriptions (`lifecycle_stage.py`) updated to
+  match: both stages now explicitly told to cite `source_phase`/`source_id` per finding.
+
+**Verified live**, full loop, after a clean backend restart: Respond's `containment` stage showed a
+real 3-row **Consolidated Security Incident Queue** — `INC-GOV-GOV-004` (Govern), `INC-PRO-SEC-
+CUSTOM-001` (Protect), `INC-DET-PROMPT-001` (Detect), Critical-first — and the real ContainmentAgent
+LLM produced 3 findings mapping 1:1 to those exact rows, each citing the real incident id and a
+concrete remediation. Recover's `guardrail_update` stage, immediately after, opened with "The
+analysis of the Consolidated Security Incident Queue revealed three open incidents..." and named
+all three real incident ids by source_phase/source_id — confirming the extra cross-reference input
+genuinely reached the LLM's real analysis, not just the UI. No console errors beyond the one
+expected stale 401; dashboard KPIs (MTTC, HITL Approval Rate, etc.) recomputed without error against
+the new schema, gracefully falling back to their documented defaults where the old
+`containment_actions`↔`incident_queue` id linkage no longer matches (honest behavior, not a
+regression — no KPI silently fabricated a number).
+
+**Follow-up: visual phase order now matches the real computation order.** User caught that the
+story bar still showed Govern first, even though its real evaluation now runs after Detect — two
+genuinely different orderings (backend data-computation sequence vs. the UI's display sequence)
+that happened to both encode "phase order" separately, so fixing one didn't touch the other. Since
+the whole point was for Respond/Recover's real remediation view to feel connected to what Govern/
+Identify/Protect/Detect actually found, user asked for the visual sequence to match too. Every
+place a phase order was hardcoded got updated from `[govern, identify, protect, detect, respond,
+recover]` (or `[identify, protect, detect, respond, recover, govern]`) to
+`[identify, protect, detect, govern, respond, recover]`: `StoryBar.tsx`, `Sidebar.tsx`,
+`DashboardPage.tsx` (both its own gauge-order constant and the hero subtitle text),
+`PhaseWorkspace.tsx`'s `STORY_ORDER` (the "Continue to next phase →" chaining), `DataExplorerPage.tsx`,
+`AgentsPage.tsx`, and `backend/main.py`'s `PHASE_KEYS` plus the two inline phase-order lists building
+`gauges`/`trend`. tsc and a Python syntax check both clean; verified live after a backend restart —
+story bar, dashboard gauge rings, and the hero subtitle all now read Identify → Protect → Detect →
+Govern → Respond → Recover, consistently everywhere.
+
+# 55. Second full walkthrough + dedicated Dashboard audit — two real bugs found and fixed
+
+User asked for a fresh full 6-phase walkthrough plus a specific check that every Dashboard element
+is genuinely live and rendering correctly, not just present. Ran all 16 stages again end to end
+(Identify → Protect → Detect → Govern → Respond → Recover, the new order) — zero real errors, every
+"Continue to X →" button confirmed the new chaining live (Continue to Govern appearing right after
+Detect, Continue to Respond right after Govern), every HITL gate approved, "Story complete" reached.
+
+**Dashboard audit found a real bug.** A raw page-text capture right after navigating to `/` showed
+GitHub, Target Agent, and LLM as "not configured"/"not live" — despite `/api/settings` (checked
+directly via an authenticated fetch) correctly reporting all three as live. Root cause: `isLoading`
+in `DashboardPage.tsx` only gates on the `dashboard` query; `settings` and `mcpTools` are separate
+`useQuery` calls that can still be in flight on first paint, and the live-systems chips read from
+those two directly with no loading state of their own — so on a fresh navigation, the page could
+render before `settings`/`mcpTools` resolved, showing a real false-negative for exactly the window
+between `dashboard` finishing and the other two catching up. Fixed by adding `settingsLoaded`/
+`toolsLoaded` flags per chip, so each one now shows a neutral "checking…" state until its own real
+data has actually arrived, instead of asserting "not configured" before that's knowable. Verified:
+`data_health` is `{}` (no real fetch errors) and `gauges`/`trend` come back in the correct new
+phase order directly from `/api/dashboard`.
+
+**Also fixed in passing**, spotted while spot-checking `AgentsPage.tsx`'s own phase-order array
+(also updated in Section 54): its hero subtitle read "16 specialised security agents across the 5
+NIST CSF phases" — a pre-existing off-by-one (the app has always covered 6 phases, Govern included)
+unrelated to the reordering itself, corrected to "6" while already in that file.
+
+tsc clean after both fixes; verified live — dashboard chips, gauge order, hero text, Data Explorer's
+phase filter tabs, and Agents page all confirmed correct and consistent on a fresh reload, with real
+timestamps in Recent AI Operations matching this session's actual run.

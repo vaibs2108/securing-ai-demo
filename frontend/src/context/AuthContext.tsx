@@ -1,7 +1,7 @@
-import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
+import { createContext, useEffect, useState, type ReactNode } from "react";
 import { api, clearToken, getToken, setToken } from "../lib/api";
 
-interface AuthState {
+export interface AuthState {
   username: string | null;
   role: string | null;
   loading: boolean;
@@ -9,7 +9,13 @@ interface AuthState {
   logout: () => void;
 }
 
-const AuthContext = createContext<AuthState | null>(null);
+// Fast Refresh requires a file to export only components — the useAuth hook
+// lives in ./useAuth.ts specifically so editing it (or anything that
+// triggers this file's HMR graph) doesn't force a full module invalidation
+// that briefly desyncs this context from already-mounted consumers (was
+// producing a real, reproducible "useAuth must be used within AuthProvider"
+// console error on nearly every edit — see AGENTS.md).
+export const AuthContext = createContext<AuthState | null>(null);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [username, setUsername] = useState<string | null>(null);
@@ -51,10 +57,4 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       {children}
     </AuthContext.Provider>
   );
-}
-
-export function useAuth(): AuthState {
-  const ctx = useContext(AuthContext);
-  if (!ctx) throw new Error("useAuth must be used within AuthProvider");
-  return ctx;
 }
