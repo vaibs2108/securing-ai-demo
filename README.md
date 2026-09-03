@@ -55,3 +55,28 @@ uv run uvicorn backend.main:app --port 8420
 Open `http://localhost:8420` — this one process serves both the API and the built
 React app, identically to how the Docker image runs it (just on port 7860 there,
 bound to `0.0.0.0` instead of `127.0.0.1`).
+
+### Live companion services (optional, for the Dashboard's live-systems strip)
+
+The Dashboard's GitHub/Target Agent/Slack/Lakera/Garak/PyRIT/LLM chips reflect real
+connections, not mocks. GitHub/Slack/Lakera/LLM come from this repo's own `.env`; the
+other three are separate local processes this `.env`'s `TARGET_AGENT_URL` /
+`GARAK_RUNNER_URL` / `PYRIT_RUNNER_URL` point at (`http://127.0.0.1:8091` / `:8095` /
+`:8096` by default). Start whichever ones you want live, each in its own terminal:
+
+```bash
+# Target agent (sibling repo D:\GenAi\Projects\meridian-support-agent)
+cd ../meridian-support-agent
+.venv/Scripts/uvicorn main:app --port 8091
+
+# Garak runner (services/garak-runner)
+cd services/garak-runner
+.venv/Scripts/uvicorn main:app --port 8095
+
+# PyRIT runner (services/pyrit-runner)
+cd services/pyrit-runner
+.venv/Scripts/uvicorn main:app --port 8096
+```
+
+Any of the three left unstarted just shows "not live" on its Dashboard chip — the rest
+of the app still works normally.
