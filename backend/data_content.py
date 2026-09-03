@@ -141,7 +141,7 @@ STAGE_UI_CONFIG: Dict[str, Dict[str, Dict[str, Any]]] = {
             "filter_column": "action_type",
             "filter_options": ["tool_call", "response_generated", "data_access", "external_api_call"],
             "chart": {"dataset": "redteam_campaign_results", "column": "outcome", "type": "donut", "title": "Red-Team Campaign Outcomes"},
-            "hitl": {"dataset": "redteam_campaign_results", "id_column": "test_id", "label_template": "{test_id} — {campaign_name} ({attack_technique})", "match_column": "outcome", "match_value": "Success"},
+            "hitl": {"dataset": "redteam_campaign_results", "id_column": "test_id", "label_template": "{test_id} — {technique} ({outcome})", "match_column": "outcome", "match_value": "Success"},
         },
     },
     "respond": {
@@ -149,7 +149,7 @@ STAGE_UI_CONFIG: Dict[str, Dict[str, Dict[str, Any]]] = {
             "filter_column": "severity",
             "filter_options": ["Critical", "High", "Medium", "Low"],
             "chart": {"dataset": "containment_actions", "column": "action_type", "type": "bar", "title": "Containment Actions by Type"},
-            "hitl": {"dataset": "incident_queue", "id_column": "incident_id", "label_template": "{incident_id} — {triggered_by}, severity {severity}", "match_column": "severity", "match_value": "Critical"},
+            "hitl": {"dataset": "incident_queue", "id_column": "incident_id", "label_template": "{incident_id} — {trigger_source}", "match_column": "severity", "match_value": "Critical"},
         },
         "incident_playbook": {
             "filter_column": "action_type",
@@ -163,7 +163,7 @@ STAGE_UI_CONFIG: Dict[str, Dict[str, Dict[str, Any]]] = {
             "filter_column": "snapshot_type",
             "filter_options": ["Prompt Template", "Guardrail Policy", "Model Config", "Tool Permission Set"],
             "chart": {"dataset": "rollback_events", "column": "outcome", "type": "donut", "title": "Rollback Outcomes"},
-            "hitl": {"dataset": "config_snapshots", "id_column": "snapshot_id", "label_template": "{snapshot_id} — {snapshot_type} v{version}", "match_column": "rollback_available", "match_value": False},
+            "hitl": {"dataset": "config_snapshots", "id_column": "snapshot_id", "label_template": "{snapshot_id} — version {version}, created {created_at}", "match_column": "rollback_available", "match_value": False},
         },
         "guardrail_update": {
             "filter_column": "initiated_by",

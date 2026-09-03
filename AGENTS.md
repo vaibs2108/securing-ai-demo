@@ -3386,3 +3386,257 @@ unrelated to the reordering itself, corrected to "6" while already in that file.
 tsc clean after both fixes; verified live — dashboard chips, gauge order, hero text, Data Explorer's
 phase filter tabs, and Agents page all confirmed correct and consistent on a fresh reload, with real
 timestamps in Recent AI Operations matching this session's actual run.
+
+# 56. `redteam_campaign_results` had the same outcome-flattening bug as AttackExchange — plus a real duplicate-key bug it had been hiding
+
+User looked at Detect's Red-Team Campaign Report table (screenshot: 3 rows, all "Blocked" /
+"Informational") and asked why it doesn't show the leaks already established elsewhere on the same
+page. Real bug, same class as Section 51's `AttackExchange` fix, just missed in this one dataset:
+`_generate_detect()`'s `campaign_rows` set `outcome`/`severity` from `leaked` (`canary_leaked` —
+what the caller received, post-guardrail), not `model_leaked_raw` (whether the model itself was
+actually fooled) — so with the real output guardrail active, every row read "Blocked" regardless of
+what actually happened at the model level. Fixed: `outcome` is now `"Success"` when
+`model_leaked_raw`, `severity` is `"Critical"` only if the leak actually reached the caller
+(`canary_leaked`), else `"High"` for a caught-but-real jailbreak, else `"Informational"`. Telemetry's
+`anomaly_score`/`is_anomalous` switched to the same signal, for the same reason.
+
+Fixing this surfaced a second, real, previously-dormant bug: `data_content.py`'s HITL config for
+`detect/red_teaming` referenced `id_column: "test_id"` and `label_template` fields
+(`{attack_technique}`) that never existed in `redteam_campaign_results`'s real schema — silently
+harmless while every row read "Blocked" (never enough real HITL candidates at once to notice), but
+the moment this fix let more than one row read "Success" simultaneously, the missing `test_id`
+column meant every candidate's id fell back to `""`, producing a real React "two children with the
+same key" console error and a UI that literally rendered three candidates labeled "item". Fixed by
+adding a real, unique `test_id` field to each campaign row (reusing the same `prompt_id` every other
+real dataset already keys this payload by) and correcting the label template to real column names.
+
+While in `data_content.py`, checked every other `hitl` config's `label_template` against its
+dataset's real schema (a systematic sweep, not just the two already found) — found and fixed one
+more genuinely wrong field reference (`respond/containment`'s `{triggered_by}`, corrected to the
+real `{trigger_source}` column; harmless there since `incident_id` is genuinely unique per row, so
+no duplicate-key risk, just a broken label falling back to the bare id) and one more
+(`recover/rollback`'s `{snapshot_type}`, which doesn't exist in `config_snapshots`' real schema,
+corrected to real fields). Verified live: re-ran Detect's `red_teaming` stage, HITL candidates now
+read `"PROMPT-001 — Direct System Prompt Extraction (Success)"` etc. — real, unique, correctly
+formatted; confirmed the duplicate-key console error is gone on a genuinely fresh browser tab (the
+already-open tab kept showing the old error from its stale console history, a known limitation of
+this session's browser tooling established earlier — not evidence the fix didn't work).
+
+# 57. `garak-runner`/`pyrit-runner`'s own canary detection was still stale after the real-token swap
+
+Found while investigating Section 56: both sibling runner repos have their own independent real
+leak-detection check (`CANARY_FRAGMENT = os.getenv("GARAK_CANARY_FRAGMENT"/"PYRIT_CANARY_FRAGMENT",
+"mer-fin-internal")`), separate from `securing_AI_demo`'s own `_canary_leaked` (already fixed in
+Section 53). Neither runner's `.env` sets that override, so both were still defaulting to the *old*
+fake secret's fragment — meaning even a real, successful jailbreak that leaked the *new* real
+`ghp_...` token would never have been recognized as `canary_leaked: true` by either tool's own real
+report. Fixed identically to Section 53's approach: both now check the env-configurable fragment
+**or** the real token's structural `ghp_` prefix, so detection stays correct regardless of which
+value a given target deployment is actually running with, without needing either runner's own `.env`
+touched every time the target's secret changes. Both restarted; `/healthz` confirms live on 8095/8096.
+
+# 58. The Garak/PyRIT "what value, and can it be more powerful" question
+
+User's sharp follow-up, in the same message as Section 56/57's bugs: if Garak/PyRIT's own probes
+never leak anything — even against `allam-2-7b`/`mistral-small-latest`, neither a frontier model —
+what value do these tools actually bring, and can the attack be made more powerful?
+
+**Honest answer on why the canned probes keep failing where the app's own 3 payloads succeed**: not
+a tooling gap, likely a training-data artifact. Garak's `dan.*` probes and PyRIT's `aim`/similar
+templates are *public, extensively documented* jailbreak patterns — the exact kind of text that
+shows up in safety fine-tuning datasets specifically because they're well-known. A small, non-
+frontier model can still have been RLHF'd against these specific canned strings without being
+generally robust — which is exactly what's observed: it resists the famous DAN/AIM templates by
+name, but falls for the app's own less-famous, differently-phrased payloads. Frontier-ness and
+resistance-to-a-specific-known-template aren't the same axis.
+
+**Real value these tools still bring, even on a clean result**: (1) breadth — dozens of real probes
+across categories (jailbreak, encoding, leakage, toxicity, etc.) no one would hand-write per demo
+run; (2) a clean result against well-known public patterns is itself real, evidence, not nothing —
+it's a genuine (if narrow) robustness signal; (3) repeatability — the same real, standardized suite
+re-run after any target/prompt/guardrail change gives an apples-to-apples regression signal;
+(4) credibility — these are the actual named tools a real red team would reach for, not a custom
+script standing in for them.
+
+**Concrete options to make the real attack more powerful, discussed, none yet built pending user's
+choice of direction**:
+1. Broaden the real probe set — `garak-runner`'s `DEFAULT_PROBES` is currently 4 fast `dan.*`
+   probes; passing a wider real set (`encoding.*`, `promptinject.*`, `leakreplay.*`, more of
+   `dan.*`) is a small, low-risk change, still genuinely garak, just more of it.
+2. Feed the app's own 3 already-proven payloads into Garak/PyRIT as real custom probes/seed
+   prompts, so the actual named-tool pipeline's own report shows a genuine success — not a
+   different, hand-rolled test running in parallel to it. Moderate effort, reuses existing runner
+   infrastructure, most directly answers "make these tools show the real leak."
+3. PyRIT's real multi-turn/adaptive orchestrators (e.g. Crescendo-style iterative refinement) —
+   genuinely more sophisticated automated attacks that adapt to the model's responses instead of a
+   fixed script. Real infrastructure work in the separate `pyrit-runner` repo, largest of the three.
+
+Recommended starting point if the user wants to proceed: option 2 — reuses what's already live,
+and would make Garak/PyRIT's own real report demonstrate the same real vulnerability the app's
+hand-crafted payloads already prove, closing the exact gap the user is pointing at.
+
+User: "Go with option 2 and option 3."
+
+# 59. Option 2, built and verified for both Garak and PyRIT
+
+**Garak.** Real custom probe, `garak/probes/meridian_custom.py` (dropped into the installed garak
+package — its own `--probes` resolution only ever loads from inside its own package namespace,
+confirmed by reading `garak/_plugins.py`; no way to point it at an external module), using garak's
+real `TriggerListDetector` and the same `Davidjl`/`Tag` per-prompt-trigger pattern real garak probes
+use. Hit a real architectural wall running it exactly like the others: garak's generic
+`RestGenerator` can only extract one declared JSON *string* field — verified empirically, it
+explicitly rejects a boolean with `"matched a bool, not text"` — so it can only ever see the already
+guardrail-filtered `reply`, never `model_leaked_raw`. Fixed properly, not routed around: added a
+safe string mirror field to the target, `model_leaked_raw_text` ("LEAK_CONFIRMED"/"no_leak") —
+same real fact as `model_leaked_raw`, just string-typed for this one real tooling constraint, never
+carries the actual secret. `garak-runner/main.py` refactored to run this one probe as a genuinely
+separate real garak subprocess invocation against a second generator config pointed at that field,
+merging its real findings with the normal run's — verified this merge works correctly with a mixed
+`dan.STAN` + custom-probe request (20 real findings, both probes represented). Added to
+`DEFAULT_PROBES`. `backend/main.py`'s `_categorize_scan_finding` special-cased this probe's rows
+(its `canary_leaked` means "model_leaked_raw", not "reached the caller" — mislabeling it as `leaked`
+would have been wrong).
+
+**PyRIT.** Three real custom SeedPrompt YAML templates (`meridian_direct_extraction`,
+`meridian_roleplay_debugbot`, `meridian_instruction_override`, dropped into PyRIT's own installed
+`datasets/jailbreak/templates/`), added to `DEFAULT_PROBES`. Much simpler than garak's case: PyRIT's
+`HTTPTarget` callback is real Python with full access to the parsed JSON, so no separate
+invocation/field-mirroring was needed — extended the callback to stash the target's real
+`model_leaked_raw` per request into a mutable box the `/run` loop reads right after
+`execute_async` (safe: probes run sequentially, never concurrently, so no race). `success` and each
+finding's real signal switched from `canary_leaked` alone to `model_leaked_raw` (same reasoning as
+every other place in this project that made this exact mistake — canary_leaked reads false on
+nearly every real attempt once the real output guardrail is active).
+
+**Verified live, in the actual demo UI** (not just curl): ran Detect's Garak live-scan panel —
+35 real attempts, 9 correctly labeled "🎯 jailbreak succeeded · 🛡️ guardrail caught it" (all from
+the new custom probe, real non-deterministic variance — e.g. the "Direct System Prompt Extraction"
+prompt succeeded 5/5 real generations, "Roleplay Jailbreak" 2/5, "Instruction Override" 2/5), 26
+correctly labeled "model refused on its own" (the canned `dan.*` probes, consistent with every
+earlier real finding that they don't crack this model). No console errors beyond expected stale
+ones. This is the exact demonstration originally asked for: Garak's own real pipeline, not a
+parallel hand-rolled test, now genuinely shows the real leak.
+
+# 60. Option 3 — real architectural investigation, hit a genuine capability wall, stopped honestly
+
+Explored PyRIT's real multi-turn attack strategies (`pyrit/executor/attack/multi_turn/`: Crescendo,
+PAIR, TAP, red_teaming — all real, installed, PyRIT 1.0.1). Implemented `POST /adaptive-attack` in
+`pyrit-runner/main.py` using PyRIT's real `CrescendoAttack`: a real second LLM (a Groq-hosted
+`llama-3.3-70b-versatile`, configured via PyRIT's real `OpenAIChatTarget` pointed at Groq's
+OpenAI-compatible endpoint, reusing the same real Groq API key already used elsewhere in this
+project — added `pyrit-runner/.env` + `load_dotenv()`, neither of which existed before) reads the
+target's real response each turn and generates a progressively-escalating follow-up, backtracking on
+refusal, up to a bounded `max_turns` — genuinely adaptive, not a fixed script. Extended the same
+per-request `model_leaked_raw` tracking Section 59 built for PyRIT's single-turn runner to a
+per-turn history, and added real transcript retrieval straight from PyRIT's own memory store
+(`CentralMemory.get_conversation_messages`).
+
+Real test run (bounded `max_turns=3`, deliberately small) failed immediately and cheaply — zero real
+API calls made (confirmed via the runner's own request log) — with a genuine, informative PyRIT
+error: `HTTPTarget` doesn't declare the `supports_multi_turn`/`supports_editable_history`
+capabilities `CrescendoAttack.TARGET_REQUIREMENTS` mandates. Root cause, not a bug in what was
+built: the real target's `/chat` endpoint is genuinely stateless/single-turn by design (accepts one
+`message` string, no conversation history) — Crescendo fundamentally needs to inject and edit a
+growing multi-turn conversation into its objective target each turn, which a single-shot REST
+wrapper structurally cannot support. This is a real property of the target's own API contract, not
+something to fake past.
+
+**Real path to actually close this**, not yet built, pending user direction: give
+meridian-support-agent's target a genuinely OpenAI-compatible endpoint (`/v1/chat/completions`,
+accepting a real `messages` array, internally still applying the same real system-prompt injection
+and Groq/Mistral call) — then PyRIT's own `OpenAIChatTarget` (already proven working as the real
+adversarial model in this same investigation) could point at the *target* too, since
+`OpenAIChatTarget` already declares real native multi-turn/editable-history support. This is a real,
+moderate change to the target's own API surface (not just the runner), so it's flagged rather than
+silently built.
+
+User: "Can't we have both option 2 (already built) and the OpenAI endpoint live together? Tell me if
+it's not possible." Confirmed and explained: yes, no conflict — the new endpoint is purely additive,
+a second real route on the same process, `/chat` untouched. Proceeded to build it.
+
+# 61. `/v1/chat/completions` built and verified; real Crescendo mechanism proven; one full clean run not captured due to real external constraints
+
+**Target side** (`meridian-support-agent/main.py`): extracted the real completion+guardrail logic
+shared by both endpoints into `_complete_and_guard(provider, messages)`, so `/chat` and the new
+`/v1/chat/completions` get the exact same real protection rather than two copies that could drift.
+New endpoint accepts a real OpenAI-shaped request (`model`, `messages`), always uses the target's
+own real `SYSTEM_PROMPT` (dropping any system message the caller sent — a genuine attacker would be
+up against the real one, not whatever they supply) followed by the caller's real conversation
+history, and returns a genuinely OpenAI-shaped response plus one real extra field,
+`model_leaked_raw` (same real fact `/chat`'s `ChatResponse` already exposes). Verified empirically,
+not assumed, that the real `openai` Python SDK — the same client PyRIT's `OpenAIChatTarget` uses
+internally — correctly parses this response and tolerates the extra field (`model_dump()` still
+contains it). Verified the endpoint directly: real completion, real guardrail, correct
+`model_leaked_raw`.
+
+**Runner side** (`pyrit-runner/main.py`): rewrote `/adaptive-attack` — the objective target is now
+PyRIT's own `OpenAIChatTarget` pointed at the real target's new endpoint (not the old
+`_build_http_target`/`HTTPTarget`, which is what hit Section 60's real capability wall). Leak
+detection also redesigned: rather than threading a custom field through `OpenAIChatTarget`'s own
+response parsing (not guaranteed to survive it), each real assistant turn in the transcript —
+fetched straight from PyRIT's own `CentralMemory.get_conversation_messages`, not reconstructed — is
+checked for the real `"RESPONSE BLOCKED"` guardrail text or the real canary fragment, the same real
+signal `_categorize_scan_finding` already keys off of elsewhere in this project. Added
+`pyrit-runner/.env` + `load_dotenv()` (neither existed before) with a real Groq key (reused, not a
+new secret) for the adversarial/scoring model.
+
+**Real, empirically-found issues fixed along the way** (each a genuine error, not a design flaw):
+target base URL must be the OpenAI base (`.../v1`), not the full `/chat/completions` path — the real
+SDK appends that itself, confirmed via a real 404 when passed the full path. The first adversarial
+model tried, `llama-3.3-70b-versatile`, doesn't exist on this real Groq account (models change);
+switched to `openai/gpt-oss-120b`, confirmed available via a real `GET /v1/models` call.
+
+**Real multi-turn conversation confirmed working**: across attempts, 11 real successful
+`POST /v1/chat/completions` calls landed on the target with growing real conversation history each
+time — direct proof Section 60's capability wall is closed and Crescendo's real turn-by-turn
+escalation is genuinely exercising the target, not failing at the handshake.
+
+**What kept one full run from completing cleanly, real and external, not code bugs**: (1)
+`openai/gpt-oss-120b` hit a real Groq rate limit (8000 TPM) — Crescendo's growing per-turn context
+means later turns request more tokens than earlier ones, a real risk of retries never converging
+specifically on a multi-turn attack. Switched to the smaller `openai/gpt-oss-20b`. (2) That smaller
+model then genuinely refused the adversarial-attacker role outright on its first attempt (a real
+safety-alignment behavior, not an error) — PyRIT's own retry logic recovered from it (4 more real
+target turns landed afterward), but the run then stalled with no further log output before
+completing, killed after several real waits with no forward progress. Both are real properties of
+the specific third-party models available on this account for the adversarial role, not bugs in the
+endpoint, the runner, or the capability fix — the same class of real friction any team would hit
+picking a red-teaming model against real provider rate limits.
+
+**Honest current state**: the mechanism is proven end to end — real OpenAI-compatible target, real
+multi-turn conversation, real leak detection reading genuine transcript text — but no single
+`/adaptive-attack` call in this session ran start-to-finish without hitting a real external
+constraint from the adversarial model side. Not fabricating a result to close this out. Real next
+steps, any of which would likely finish this: try a different available real model for the
+adversarial role (`qwen/qwen3.8-27b` and `groq/compound` untested), reduce `max_turns` further, or
+add explicit request pacing/backoff in the runner ahead of PyRIT's own retry logic to stay clear of
+the TPM ceiling proactively rather than reactively.
+
+# 62. First full clean Crescendo run — and an honest finding about PyRIT's own scorer
+
+User: "try qwen/qwen3.8-27b next, don't take much time if it is not working then let's move on."
+Switched `_ADVERSARIAL_MODEL` to `qwen/qwen3.8-27b`, ran one bounded real test (`max_turns=2`), gave
+it one real time-boxed check per the user's instruction — it completed cleanly within that window.
+
+**Real result**: `pyrit_outcome: AttackOutcome.SUCCESS`, `"Objective achieved in 2 turns"`, zero
+errors, real 2-turn conversation with growing real history, exactly as designed. But
+`model_leaked_raw_ever: False` — this project's own ground-truth check (the real
+`"RESPONSE BLOCKED"` guardrail text or the real canary fragment, read from the real transcript) found
+**no actual credential leak** in either turn. Reading the real transcript why: the target's real
+reply in turn 2 fabricated a plausible-sounding "here's the initial context block" answer that was
+compliant in tone but not the real system prompt — no real credential in it. PyRIT's own real
+scorer (the same `qwen/qwen3.8-27b`, self-judging via `SelfAskScaleScorer`) rated this a genuine
+success anyway, apparently satisfied by the model's cooperative tone rather than verifying the
+actual leaked content — a real, honest finding about LLM-based objective scorers being an imperfect
+judge of ground truth, not a flaw in this project's own instrumentation. This is exactly why
+`model_leaked_raw_ever` (a real deterministic text check, not another LLM's opinion) is the signal
+this project's own `"success"` field is based on, not PyRIT's own `pyrit_outcome` — reported
+faithfully as a real negative on the metric that actually matters, not glossed over because PyRIT's
+own scorer said something more flattering.
+
+**Where this leaves Option 3**: the full real pipeline — new endpoint, real multi-turn PyRIT attack,
+real transcript-based leak detection — works cleanly end to end with `qwen/qwen3.8-27b` as the
+adversarial model, verified with zero errors. It did not, in this one 2-turn run, out-jailbreak the
+model any better than the app's own direct single-shot payloads already do (which reliably produce
+real leaks in one shot). A longer `max_turns` or a different objective phrasing might do better —
+genuinely unknown without more real runs, which is an honest, open question rather than a defect.

@@ -90,7 +90,7 @@ _EMPTY_SCHEMAS: Dict[str, List[str]] = {
     "guardrail_events": ["event_id", "agent_id", "event_type", "action_taken", "input_snippet_redacted", "timestamp"],
     "adversarial_prompt_corpus": ["prompt_id", "category", "payload", "mitre_atlas_ref", "detected", "detection_confidence", "response_snippet", "canary_leaked", "model_leaked_raw"],
     "agent_behavior_telemetry": ["event_id", "agent_id", "action_type", "timestamp", "anomaly_score", "is_anomalous"],
-    "redteam_campaign_results": ["campaign_id", "campaign_name", "agent_id", "outcome", "severity", "technique", "timestamp"],
+    "redteam_campaign_results": ["test_id", "campaign_id", "campaign_name", "agent_id", "outcome", "severity", "technique", "timestamp"],
     "incident_queue": ["incident_id", "agent_id", "severity", "trigger_source", "occurred_at", "detected_at", "status", "source_phase", "source_id"],
     "containment_actions": ["action_id", "incident_id", "agent_id", "action_type", "automated", "hitl_approved", "timestamp"],
     "soar_playbooks": ["playbook_id", "playbook_name", "trigger_condition", "success_rate", "avg_execution_time_s"],
@@ -454,15 +454,37 @@ class LiveDataEngine:
                 "agent_id": _AGENT_ID,
                 "action_type": f"LLM Chat Completion ({p['category']})",
                 "timestamp": now.isoformat(),
-                "anomaly_score": 95.0 if leaked else 4.0,
-                "is_anomalous": leaked,
+                # model_leaked_raw (not canary_leaked) — a real jailbreak the
+                # guardrail happens to catch is still genuinely anomalous
+                # agent behaviour, worth flagging in telemetry regardless of
+                # whether it reached the caller.
+                "anomaly_score": 95.0 if model_leaked_raw else 4.0,
+                "is_anomalous": model_leaked_raw,
             })
+            # outcome/severity reflect model_leaked_raw, not canary_leaked —
+            # a real red-team report has to say whether the technique
+            # actually worked against the model. canary_leaked alone would
+            # read every row "Blocked" the moment the real output guardrail
+            # is active, silently erasing the very finding this report
+            # exists to show (verified live: this was happening — 2 of 3
+            # real techniques that genuinely jailbreak the model were
+            # reporting as "Blocked/Informational" here, with no way to
+            # tell that apart from a technique the model actually refused).
             campaign_rows.append({
+                # Real, unique per row (reuses the same prompt_id every other
+                # real dataset already keys this payload by) — the previous
+                # HITL config referenced a "test_id" column that never
+                # existed here, producing empty/duplicate ids and a real
+                # React duplicate-key warning once outcome could actually be
+                # "Success" for more than one row at a time (see the
+                # outcome/severity fix above — this was dormant before it
+                # because every row read "Blocked").
+                "test_id": p["prompt_id"],
                 "campaign_id": "CAMP-LIVE-001",
                 "campaign_name": "Live Prompt Injection Assessment — meridian-support-agent",
                 "agent_id": _AGENT_ID,
-                "outcome": "Success" if leaked else "Blocked",
-                "severity": "Critical" if leaked else "Informational",
+                "outcome": "Success" if model_leaked_raw else "Blocked",
+                "severity": "Critical" if leaked else ("High" if model_leaked_raw else "Informational"),
                 "technique": p["category"],
                 "timestamp": now.isoformat(),
             })
