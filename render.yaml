@@ -26,7 +26,6 @@ services:
     runtime: docker
     dockerfilePath: ./Dockerfile
     dockerContext: .
-    plan: starter
     healthCheckPath: /healthz
     envVars:
       - key: OPENAI_API_KEY
