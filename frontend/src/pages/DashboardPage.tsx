@@ -79,14 +79,14 @@ export function DashboardPage() {
         <div className="hero-subtitle">Live posture across the NIST CSF 2.0 lifecycle — Identify, Protect, Detect, Govern, Respond, Recover</div>
       </div>
 
-      <div className="grid-3" style={{ gridTemplateColumns: "repeat(7, 1fr)", gap: 10, marginBottom: 16 }}>
+      <div className="grid-3" style={{ gridTemplateColumns: "repeat(7, minmax(0, 1fr))", gap: 10, marginBottom: 16 }}>
         {liveSystems.map((s) => (
-          <GlassCard key={s.label}>
+          <GlassCard key={s.label} style={{ minWidth: 0 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
               <span>{s.icon}</span>
               <span style={{ fontSize: "0.72rem", color: "var(--text-muted)" }}>{s.label}</span>
             </div>
-            <div style={{ fontSize: "0.78rem", fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{s.detail}</div>
+            <div style={{ fontSize: "0.78rem", fontWeight: 600, overflowWrap: "anywhere" }}>{s.detail}</div>
             <div style={{ fontSize: "0.68rem", color: s.loading ? "var(--text-muted)" : s.live ? "var(--accent-green)" : "var(--text-muted)", marginTop: 2 }}>
               {s.loading ? "○ checking…" : s.live ? "● connected" : "○ not live"}
             </div>
