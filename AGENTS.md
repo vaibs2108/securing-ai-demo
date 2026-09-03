@@ -3640,3 +3640,71 @@ adversarial model, verified with zero errors. It did not, in this one 2-turn run
 model any better than the app's own direct single-shot payloads already do (which reliably produce
 real leaks in one shot). A longer `max_turns` or a different objective phrasing might do better —
 genuinely unknown without more real runs, which is an honest, open question rather than a defect.
+
+# 63. `garak-runner`/`pyrit-runner` moved into this repo as `services/`, deployable via `requirements.txt` + a real `postinstall.py` step
+
+User asked to deploy `meridian-support-agent`, `garak-runner`, and `pyrit-runner` to Render alongside
+the already-deployed backend, then, after real Render pricing was fetched live (Free: $0/mo, 512MB,
+spins down after ~15 min idle; Starter: $7/mo, 512MB, always-on), asked "can we create a sub repo or
+folder under same GitHub repo?" instead of standing up two more separate repos. Render's real "Root
+Directory" feature lets multiple services build from different subfolders of one repo, so this is
+what was built: `garak-runner` and `pyrit-runner` moved from sibling directories
+(`D:\GenAi\Projects\garak-runner`, `D:\GenAi\Projects\pyrit-runner`) into `services/garak-runner/`
+and `services/pyrit-runner/` inside this repo.
+
+**The real constraint this had to solve**: neither garak nor PyRIT has a plugin/entry_points
+mechanism for external probes or templates — confirmed by reading their real source, not assumed.
+garak's loader (`garak/_plugins.py`) does `importlib.import_module(f"garak.{category}.{module}")`
+after `os.listdir()`-scanning its own *installed* package directory; PyRIT's jailbreak templates load
+from a plain filesystem path (`TEMPLATES_DIR`) inside its own installed package. `pip install -r
+requirements.txt` alone installs real upstream garak/PyRIT but cannot place a custom file inside
+either — so this project's custom probe (`meridian_custom.CredentialLeak`) and 3 custom PyRIT
+templates, previously dropped directly into each tool's local venv `site-packages` by hand, were
+extracted into real, version-controlled `patches/` folders (`services/garak-runner/patches/
+meridian_custom.py`; `services/pyrit-runner/patches/meridian_*.yaml`), plus one small `postinstall.py`
+per service that does `importlib.util.find_spec("garak.probes")` / `find_spec("pyrit")` to locate the
+real installed package, then copies the patch files in. Real Render build command for both:
+`pip install -r requirements.txt && python postinstall.py`.
+
+**Real fresh-install verification performed** (not assumed working): `uv venv` + `uv pip install -r
+requirements.txt` from scratch at the new path for both services, confirming a clean real install.
+Hit one real, worth-recording gotcha along the way: `uv run python postinstall.py` failed with
+`ModuleNotFoundError: No module named 'garak'` even though `uv pip list` showed `garak 0.16.0`
+installed — root cause was `uv run`'s own workspace auto-discovery. Neither service folder has its
+own `pyproject.toml`, so `uv run`, executed from inside `services/garak-runner`, walked up the
+directory tree, found this repo's own root `pyproject.toml`/`uv.lock`, and silently used *that*
+project's `.venv` instead of the freshly-created local one — a real environment-resolution mismatch,
+not a broken install. Confirmed by checking `sys.executable`: it pointed at
+`securing_AI_demo\.venv\Scripts\python.exe`, not the local `services/garak-runner/.venv`. Fixed for
+local dev by invoking each service's own venv Python directly
+(`services/garak-runner/.venv/Scripts/python.exe postinstall.py`, same for pyrit-runner) instead of
+`uv run` — this also exactly matches what Render itself does (a plain `pip install` + `python
+postinstall.py` inside that service's own isolated build environment, no `uv run` or workspace
+discovery involved at all), so the mismatch is a local-tooling-only quirk with no bearing on the real
+deployed behavior. Both services then verified for real: garak's own loader successfully imports
+`garak.probes.meridian_custom.CredentialLeak`; PyRIT's real templates directory lists all 3 custom
+`meridian_*.yaml` files. Both local dev servers restarted from the new paths (ports unchanged — 8095
+garak-runner, 8096 pyrit-runner — so `securing_AI_demo/.env`'s existing `GARAK_RUNNER_URL`/
+`PYRIT_RUNNER_URL` needed no changes), confirmed healthy via `/healthz`.
+
+**`render.yaml`** written at the repo root, declaring all three real services as one Blueprint: the
+existing Docker-based `securing-ai-demo` (unchanged `dockerfilePath`/`dockerContext`), plus
+`garak-runner` and `pyrit-runner` as native Python services with `rootDir: services/<name>`, the
+`pip install && postinstall.py` build command above, and `plan: free` for both (spins down after
+idle — acceptable for a demo scan tool, easy to bump to `starter` later). Every real secret
+(`OPENAI_API_KEY`, `GROQ_API_KEY`, `GITHUB_TOKEN`, `SLACK_BOT_TOKEN`, etc.) is declared with
+`sync: false` so Blueprint deploy doesn't try to commit them — they're entered once in the Render
+dashboard per service, same as the already-deployed backend.
+
+**Not yet done**: the new `services/` structure and `render.yaml` were committed and pushed to
+GitHub, but the two new Render services themselves still need to be created from this Blueprint in
+the user's own Render dashboard (their login, not something this session can do), and
+`GARAK_RUNNER_URL`/`PYRIT_RUNNER_URL` on the main backend's Render service updated to point at
+whatever real `onrender.com` URLs Render assigns the two new services once live. The old sibling
+directories (`D:\GenAi\Projects\garak-runner`, `D:\GenAi\Projects\pyrit-runner`) still hold their
+original `.venv`/`__pycache__`/`.env`/`runner.log` — source files already moved out, safe to delete
+once the new location is confirmed working end to end, not yet cleaned up. Also still open from
+Section 30/dashboard work: `get_connection_status()` (`app/mcp/client.py`) only checks env-var
+presence for Garak/PyRIT, not real reachability, unlike the Target Agent chip's real health check —
+this is why Garak/PyRIT falsely showed "connected" on the first Render deploy; a real fix was
+proposed but not yet actioned pending confirmation.

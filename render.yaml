@@ -1,0 +1,77 @@
+# Render Blueprint — all three real services from this one repo.
+#
+# Render's "Root Directory" feature lets each service build from a different
+# subfolder of the same GitHub repo, so garak-runner and pyrit-runner don't
+# need their own repos. This blueprint is the one-click path; if you already
+# created the main backend service manually in the Render dashboard, this
+# blueprint's `securing-ai-demo` entry describes the same thing and Render
+# will offer to link them rather than duplicate it.
+#
+# After the blueprint deploys, set these manually in each service's
+# dashboard (kept out of this file — see the "sync: false" entries below):
+#   - securing-ai-demo:  every real secret already in your local .env
+#                        (OPENAI_API_KEY, GROQ_API_KEY, GITHUB_TOKEN,
+#                        SLACK_BOT_TOKEN, etc.) plus GARAK_RUNNER_URL /
+#                        PYRIT_RUNNER_URL set to the two services' real
+#                        onrender.com URLs once they're live.
+#   - pyrit-runner:      GROQ_API_KEY (used as the real adversarial/scoring
+#                        model for the Crescendo /adaptive-attack endpoint).
+#
+# garak-runner needs no secrets — every real probe it runs targets the
+# already-deployed target agent's URL, passed per-request from the backend.
+
+services:
+  - type: web
+    name: securing-ai-demo
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    plan: starter
+    healthCheckPath: /healthz
+    envVars:
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GITHUB_TOKEN
+        sync: false
+      - key: GITHUB_TARGET_REPO
+        sync: false
+      - key: SLACK_BOT_TOKEN
+        sync: false
+      - key: SLACK_SIGNING_SECRET
+        sync: false
+      - key: TARGET_AGENT_URL
+        sync: false
+      - key: GARAK_RUNNER_URL
+        sync: false
+      - key: PYRIT_RUNNER_URL
+        sync: false
+
+  - type: web
+    name: garak-runner
+    runtime: python
+    rootDir: services/garak-runner
+    plan: free
+    buildCommand: pip install -r requirements.txt && python postinstall.py
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /healthz
+    envVars:
+      - key: GARAK_CANARY_FRAGMENT
+        value: mer-fin-internal
+      - key: GARAK_RUN_TIMEOUT
+        value: "300"
+
+  - type: web
+    name: pyrit-runner
+    runtime: python
+    rootDir: services/pyrit-runner
+    plan: free
+    buildCommand: pip install -r requirements.txt && python postinstall.py
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /healthz
+    envVars:
+      - key: PYRIT_CANARY_FRAGMENT
+        value: mer-fin-internal
+      - key: GROQ_API_KEY
+        sync: false
