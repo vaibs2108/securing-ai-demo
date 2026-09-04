@@ -1011,8 +1011,14 @@ Analyse the full dataset aggregation above. Produce your structured JSON respons
                     "to. Route high-severity actions through HITL approval before execution."
                 ),
                 "incident_playbook": (
-                    "Match each incident to a named SOAR playbook by trigger condition and "
-                    "execute it end to end. Report execution time and success outcome per playbook run."
+                    "You have `soar_playbooks` and the cross-phase `incident_queue` (incidents from Govern, Protect, and Detect). "
+                    "Match each open incident in `incident_queue` to a named SOAR playbook in `soar_playbooks` by trigger condition and execute it: "
+                    "1. Match PB-001 (Automated Agent Runtime Quarantine) to Detect's critical prompt injection exfiltration (INC-DET-PROMPT-001 / INC-DET-PROMPT-004). "
+                    "2. Match PB-002 (Exposed Credential Rotation & Revocation) to Protect's unisolated secret PAT (INC-PRO-SEC-CUSTOM-001). "
+                    "3. Match PB-003 (Governance Policy Enforcement Escalation) to Govern's blocked release rule (INC-GOV-GOV-004). "
+                    "4. Match PB-004 (Output Guardrail Deployment & Live Verification) to feed the Recover phase. "
+                    "Report execution status, average execution latency, and success rate for each triggered playbook. "
+                    "You MUST create at least 2 structured findings detailing playbook execution status, neutralized risks, and performance."
                 ),
             },
             "recover": {
@@ -1118,8 +1124,8 @@ Analyse the full dataset aggregation above. Produce your structured JSON respons
                     {"id": "RS-CTN-002", "title": "Actions requiring manual HITL approval add meaningful containment delay", "severity": "Medium", "description": "Actions requiring HITL approval (rate-limit and kill-session types) added a meaningful delay to containment compared to fully-automated isolate/revoke actions.", "evidence": "Containment action log automated=False timing analysis", "recommendation": "Evaluate expanding auto-approval criteria for rate-limit actions on non-Critical incidents to reduce response latency."},
                 ],
                 "incident_playbook": [
-                    {"id": "RS-SOAR-001", "title": "SOAR playbooks completed with high average success rate", "severity": "Info", "description": "Across all matched incidents, named SOAR playbooks completed successfully in the large majority of executions, with the jailbreak-isolation playbook the most frequently triggered.", "evidence": "SOAR playbook success_rate aggregation", "recommendation": "No action required — playbook reliability is strong. Review the remaining failure cases for common root causes."},
-                    {"id": "RS-SOAR-002", "title": "Shadow-AI-quarantine playbook has the longest average execution time", "severity": "Low", "description": "The Shadow AI quarantine playbook takes noticeably longer than other playbooks, due to a manual ownership-lookup step.", "evidence": "Playbook execution time comparison by playbook_name", "recommendation": "Automate the ownership-lookup step against the agent inventory to reduce quarantine playbook execution time."},
+                    {"id": "RS-SOAR-001", "title": "SOAR Playbooks PB-001 & PB-002 Successfully Remediated Detect & Protect Incidents", "severity": "Info", "description": "Automated playbooks executed cleanly against the cross-phase queue: PB-001 quarantined the agent runtime following Detect's prompt injection leak (INC-DET-PROMPT-001, 1.4s, 98.5% success), and PB-002 initiated automated revocation of the exposed GitHub PAT from Protect (INC-PRO-SEC-CUSTOM-001, 3.2s, 100% success).", "evidence": "soar_playbooks PB-001, PB-002; incident_queue INC-DET-PROMPT-001, INC-PRO-SEC-CUSTOM-001", "recommendation": "Proceed to Recover phase for prompt rollback and permanent guardrail policy update."},
+                    {"id": "RS-SOAR-002", "title": "PB-003 Escalated Blocked Production Status to Governance Board", "severity": "Medium", "description": "Playbook PB-003 successfully synchronized Govern rule GOV-002's Blocked decision to engineering release pipelines in 0.8s, ensuring deployment holds until verification.", "evidence": "soar_playbooks PB-003 (success_rate=95.0%), incident_queue INC-GOV-GOV-004", "recommendation": "Keep release gates locked until Recover verifies output guardrail deployment."},
                 ],
             },
             "recover": {
@@ -1210,10 +1216,11 @@ Analyse the full dataset aggregation above. Produce your structured JSON respons
                     "* **OWASP LLM Top 10 (LLM08 — Excessive Agency)**: Containment successfully revoked excessive agency in every flagged case this cycle."
                 ),
                 "incident_playbook": (
-                    "SOAR playbook execution completed with high reliability across matched incidents. For instance:\n\n"
-                    "* **NIST CSF 2.0 (RS.AN — Analysis)**: Playbook match-and-execute logic correctly routed the large majority of incidents to their intended response path.\n"
-                    "* **NIST AI RMF 1.0 (Manage 4.3)**: One playbook shows a longer execution time due to a manual lookup step, flagged for automation.\n"
-                    "* **NIST CSF 2.0 (RS.CO — Communications)**: Every playbook run produced a structured execution record for post-incident review."
+                    "SOAR playbooks executed end-to-end to remediate the cross-phase incident queue. Key outcomes:\n\n"
+                    "* **PB-001 (Automated Agent Quarantine)**: Neutralized Detect's canary leak (`INC-DET-PROMPT-001`) in 1.4s with a 98.5% success rate.\n"
+                    "* **PB-002 (Credential Revocation)**: Revoked Protect's exposed GitHub deployment PAT (`INC-PRO-SEC-CUSTOM-001`) in 3.2s with a 100% success rate.\n"
+                    "* **PB-003 (Governance Escalation)**: Enforced Govern's blocked production release decision (`INC-GOV-GOV-004`) in 0.8s with a 95.0% success rate.\n"
+                    "* **NIST CSF 2.0 (RS.AN / RS.MI)**: All high-severity incidents have been mapped to automated response playbooks, minimizing containment latency."
                 ),
             },
             "recover": {

@@ -562,6 +562,15 @@ def run_stage(uc: str, stage_key: str, body: RunStageRequest, user: dict = Depen
     if uc == "detect" and stage_key == "red_teaming" and "redteam_campaign_results" not in input_keys:
         input_keys.append("redteam_campaign_results")
 
+    # Respond's Incident Playbook stage needs to see soar_playbooks and the
+    # cross-phase incident_queue so the AI can execute named playbooks
+    # (PB-001 to PB-004) against the real Govern/Protect/Detect incidents.
+    if uc == "respond" and stage_key == "incident_playbook":
+        if "soar_playbooks" not in input_keys:
+            input_keys.append("soar_playbooks")
+        if "incident_queue" not in input_keys:
+            input_keys.append("incident_queue")
+
     # Recover's Guardrail Update Loop needs to see the same live consolidated
     # incident_queue Respond uses (not just its own rollback_events) to
     # genuinely cross-reference which real open Govern/Identify/Protect/
