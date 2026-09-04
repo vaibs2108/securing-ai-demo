@@ -68,7 +68,6 @@ export const api = {
   assetGraph: () => request<AssetGraphData>("/asset-graph"),
   replayDetect: () => request<ReplayDetectResponse>("/recover/replay-detect", { method: "POST" }),
   historicalLeakEvidence: () => request<HistoricalLeakEvidence>("/recover/historical-leak-evidence"),
-  captureHistoricalLeak: () => request<HistoricalLeakEvidence & { note: string }>("/recover/capture-historical-leak", { method: "POST" }),
   requestApproval: (uc: PhaseKey, stageKey: string, actionType: string, summary: string) =>
     request<{ action_id: string; slack: { live: boolean; channel?: string; ts?: string; permalink?: string | null } }>(
       `/phases/${uc}/stages/${stageKey}/request-approval`,
