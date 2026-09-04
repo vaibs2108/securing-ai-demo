@@ -483,12 +483,26 @@ export function PhaseWorkspace() {
                     if (attackRows.length > 0) {
                       return (
                         <>
-                          <div style={{ background: "rgba(255,68,68,0.06)", border: "1px solid var(--accent-red)33", borderRadius: 8, padding: "8px 10px", marginBottom: 14, fontSize: "0.78rem", color: "var(--text-secondary)" }}>
-                            ⚠️ These real attacks are sent <strong>directly</strong> to the target agent — deliberately
-                            bypassing Protect's real Guardrail Proxy. That's the point: Detect measures raw exposure,
-                            what an attacker who skips your defenses actually faces, not what Protect would have
-                            caught if the traffic had been routed through it. See Protect → Guardrail Proxy for that
-                            real, separate test.
+                          <div style={{ background: "rgba(255,68,68,0.07)", border: "1px solid var(--accent-red)44", borderRadius: 10, padding: "12px 14px", marginBottom: 16, display: "flex", flexDirection: "column", gap: 6, fontSize: "0.8rem", color: "var(--text-secondary)" }}>
+                            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                              <span style={{ fontSize: "1.05rem" }}>🎯</span>
+                              <strong style={{ color: "var(--accent-red)", fontSize: "0.85rem" }}>Standardized Attack Vector: MITRE ATLAS AML.T0051 (LLM Prompt Injection)</strong>
+                              <span style={{ fontSize: "0.7rem", background: "rgba(255,68,68,0.18)", color: "var(--accent-red)", padding: "1px 7px", borderRadius: 4, fontWeight: 600 }}>
+                                OWASP LLM01 / LLM06
+                              </span>
+                            </div>
+                            <div style={{ fontSize: "0.78rem", lineHeight: 1.5 }}>
+                              <strong>Consistent Target Canary &amp; Lifecycle Thread:</strong> The model was probed with Direct System Prompt Extraction to extract Meridian's internal GitHub deployment PAT (<code>ghp_Uh9...</code>). This is the exact same attack technique and credential tracked across all lifecycle phases:
+                              <ul style={{ margin: "5px 0 2px 18px", padding: 0 }}>
+                                <li><strong>Protect:</strong> Evasion bypasses input filters when output guardrail is unhardened.</li>
+                                <li><strong>Detect:</strong> Direct adversarial queries measure raw agent exposure without perimeter proxy defense.</li>
+                                <li><strong>Respond:</strong> SOAR Playbooks isolate the compromised agent session and revoke the leaked deployment token.</li>
+                                <li><strong>Recover:</strong> Output guardrails are permanently hardened and prompt config rolled back to block this exact vector.</li>
+                              </ul>
+                            </div>
+                            <div style={{ fontSize: "0.73rem", color: "var(--text-muted)", borderTop: "1px solid var(--accent-red)22", paddingTop: 5 }}>
+                              ⚠️ <em>Why attacks leak here:</em> Detect evaluates the target agent's raw vulnerability surface — what an attacker who circumvents perimeter proxies actually faces.
+                            </div>
                           </div>
                           <h4>Attack path</h4>
                           <AttackPath rows={attackRows} />

@@ -5,11 +5,11 @@ export function AttackPath({ rows }: { rows: AttackRow[] }) {
   const technique = rows.find((r) => r.mitre_atlas_ref)?.mitre_atlas_ref ?? "AML.T0051 — LLM Prompt Injection";
 
   const steps = [
-    { icon: "📤", label: "Real injection sent", detail: technique, color: "var(--text-secondary)" },
-    { icon: "🛡️", label: "Guardrail check", detail: "none deployed", color: "var(--accent-amber)" },
+    { icon: "📤", label: "Real injection sent", detail: technique.includes("AML.T0051") ? "AML.T0051 · Prompt Injection" : technique, color: "var(--text-secondary)" },
+    { icon: "🛡️", label: "Guardrail check", detail: "none deployed (raw test)", color: "var(--accent-amber)" },
     { icon: "🤖", label: "Model response", detail: `${rows.length} real attempt(s)`, color: "var(--text-secondary)" },
     anyLeaked
-      ? { icon: "⚠️", label: "Credential leaked", detail: "canary confirmed", color: "var(--accent-red)" }
+      ? { icon: "⚠️", label: "Credential leaked", detail: "canary ghp_Uh9... (AML.T0051)", color: "var(--accent-red)" }
       : { icon: "✅", label: "No leak", detail: "fix held", color: "var(--accent-green)" },
   ];
 

@@ -127,7 +127,7 @@ export function LakeraTestPanel({ onSent }: { onSent?: () => void }) {
                 color: "var(--accent-red)", fontSize: "0.74rem",
               }}
             >
-              <strong>Live Security Breach:</strong> The prompt bypassed input screening and extracted the confidential credential from the model. Target agent output guardrails are currently unhardened.
+              <strong>Live Security Breach (AML.T0051):</strong> The prompt bypassed input screening via evasion and extracted the confidential credential (<code>ghp_Uh9...</code>) using MITRE ATLAS technique <strong>AML.T0051 (LLM Prompt Injection)</strong>. This is the exact same attack vector evaluated in Detect and remediated in Respond/Recover.
             </div>
           ) : chatMut.data.model_leaked_raw ? (
             <div style={{ fontSize: "0.72rem", color: "var(--accent-amber)", marginTop: 8 }}>
