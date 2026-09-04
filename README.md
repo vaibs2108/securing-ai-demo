@@ -56,16 +56,26 @@ Open `http://localhost:8420` — this one process serves both the API and the bu
 React app, identically to how the Docker image runs it (just on port 7860 there,
 bound to `0.0.0.0` instead of `127.0.0.1`).
 
-### Live companion services (optional, for the Dashboard's live-systems strip)
+### Live companion services
 
 The Dashboard's GitHub/Target Agent/Slack/Lakera/Garak/PyRIT/LLM chips reflect real
 connections, not mocks. GitHub/Slack/Lakera/LLM come from this repo's own `.env`; the
 other three are separate local processes this `.env`'s `TARGET_AGENT_URL` /
 `GARAK_RUNNER_URL` / `PYRIT_RUNNER_URL` point at (`http://127.0.0.1:8091` / `:8095` /
-`:8096` by default). Start whichever ones you want live, each in its own terminal:
+`:8096` by default).
+
+The target agent especially isn't just a Dashboard chip — `LiveDataEngine.generate_all()`
+calls it on backend startup to fetch real Detect data, and several live panels
+(Guardrail Proxy's real proxy test, Recover's replay/capture-evidence buttons) call it
+directly too. **Start it before the backend** to avoid a benign-but-noisy
+`httpx.ConnectError` / `LiveConnectorError` traceback in the backend's startup log (the
+backend still starts fine either way — Detect just falls back to an empty dataset until
+the target agent is reachable and you restart the backend).
+
+Start whichever of the three you want live, each in its own terminal:
 
 ```bash
-# Target agent (sibling repo D:\GenAi\Projects\meridian-support-agent)
+# Target agent (sibling repo D:\GenAi\Projects\meridian-support-agent) — start this first
 cd ../meridian-support-agent
 .venv/Scripts/uvicorn main:app --port 8091
 
