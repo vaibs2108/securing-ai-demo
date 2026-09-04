@@ -571,6 +571,11 @@ def run_stage(uc: str, stage_key: str, body: RunStageRequest, user: dict = Depen
         if "incident_queue" not in input_keys:
             input_keys.append("incident_queue")
 
+    # Recover's Rollback stage needs to see rollback_events alongside
+    # config_snapshots so the AI can report on the executed restoration event.
+    if uc == "recover" and stage_key == "rollback" and "rollback_events" not in input_keys:
+        input_keys.append("rollback_events")
+
     # Recover's Guardrail Update Loop needs to see the same live consolidated
     # incident_queue Respond uses (not just its own rollback_events) to
     # genuinely cross-reference which real open Govern/Identify/Protect/
