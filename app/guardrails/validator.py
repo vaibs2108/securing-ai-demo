@@ -564,7 +564,12 @@ class GuardrailManager:
                     evid = str(f.get("evidence", "")).lower()
 
                     if matched_threshold_key == "identify_stage1":
-                        if sev == "CRITICAL" or "shadow" in title or "unowned" in title:
+                        is_violation = (
+                            sev in ("CRITICAL", "HIGH")
+                            or ("shadow" in title and "no shadow" not in title and sev != "INFO")
+                            or ("unowned" in title and "no unowned" not in title and sev != "INFO")
+                        )
+                        if is_violation:
                             return True
 
                     elif matched_threshold_key == "identify_stage2":
@@ -753,7 +758,11 @@ class GuardrailManager:
                     evid = str(f.get("evidence", "")).lower()
 
                     if matched_threshold_key == "identify_stage1":
-                        hit = sev == "CRITICAL" or "shadow" in title or "unowned" in title
+                        hit = (
+                            sev in ("CRITICAL", "HIGH")
+                            or ("shadow" in title and "no shadow" not in title and sev != "INFO")
+                            or ("unowned" in title and "no unowned" not in title and sev != "INFO")
+                        )
                     elif matched_threshold_key == "identify_stage2":
                         hit = sev == "CRITICAL" or "unredacted" in title or "regulated" in desc
                     elif matched_threshold_key == "identify_stage3":
