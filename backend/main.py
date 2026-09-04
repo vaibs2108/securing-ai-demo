@@ -551,6 +551,17 @@ def run_stage(uc: str, stage_key: str, body: RunStageRequest, user: dict = Depen
     # (plus any live MCP enrichment) instead of all 16 datasets — see
     # AgentManager.run_stage's docstring for why that mattered.
     input_keys = [k for k in [io.get("input_key"), *live_mcp_data.keys()] if k]
+    # Protect's Guardrail Proxy needs to see the actual live guardrail_events
+    # stream (not just the static policies) so the AI analyzes real proxy
+    # events, including blocked injections and any live credential leaks.
+    if uc == "protect" and stage_key == "guardrail_proxy" and "guardrail_events" not in input_keys:
+        input_keys.append("guardrail_events")
+
+    # Detect's Automated Red-Teaming needs to see live redteam_campaign_results
+    # so the AI analyzes genuine automated campaign execution and bypasses.
+    if uc == "detect" and stage_key == "red_teaming" and "redteam_campaign_results" not in input_keys:
+        input_keys.append("redteam_campaign_results")
+
     # Recover's Guardrail Update Loop needs to see the same live consolidated
     # incident_queue Respond uses (not just its own rollback_events) to
     # genuinely cross-reference which real open Govern/Identify/Protect/

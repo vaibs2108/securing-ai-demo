@@ -458,8 +458,10 @@ class GuardrailManager:
         normalized_key = f"{use_case.lower()}_{stage.lower()}"
         stage_mappings = {
             ("identify", "risk_scoring"): "identify_stage3",
+            ("protect", "guardrail_proxy"): "protect_stage1",
             ("protect", "secrets_isolation"): "protect_stage3",
             ("protect", "policy_as_code"): "protect_stage3",
+            ("detect", "injection_detection"): "detect_stage1",
             ("detect", "red_teaming"): "detect_stage3",
             ("respond", "containment"): "respond_stage1",
             ("recover", "rollback"): "recover_stage1",
@@ -471,9 +473,17 @@ class GuardrailManager:
                 "condition": "blast_radius == Critical",
                 "confidence_floor": 85
             },
+            "protect_stage1": {
+                "condition": "severity == Critical OR credential_exfiltrated / leak detected",
+                "confidence_floor": 70
+            },
             "protect_stage3": {
                 "condition": "isolation_status == Exposed AND exposed_to_llm",
                 "confidence_floor": 85
+            },
+            "detect_stage1": {
+                "condition": "canary_leaked == True OR severity == Critical",
+                "confidence_floor": 70
             },
             "detect_stage3": {
                 "condition": "outcome == Success AND severity == Critical",
@@ -510,11 +520,27 @@ class GuardrailManager:
                             logger.info("HITL triggered by identify_stage3 condition: %s", f)
                             return True
 
+                    elif matched_threshold_key == "protect_stage1":
+                        sev = str(f.get("severity", "")).upper()
+                        title = str(f.get("title", "")).lower()
+                        desc = str(f.get("description", "")).lower()
+                        if sev == "CRITICAL" or "exfiltrat" in title or "leak" in title or "leak" in desc:
+                            logger.info("HITL triggered by protect_stage1 condition: %s", f)
+                            return True
+
                     elif matched_threshold_key == "protect_stage3":
                         isolation_status = str(f.get("isolation_status", "")).upper()
                         exposed = f.get("exposed_to_llm", False) or isolation_status == "EXPOSED"
                         if exposed:
                             logger.info("HITL triggered by protect_stage3 condition: %s", f)
+                            return True
+
+                    elif matched_threshold_key == "detect_stage1":
+                        sev = str(f.get("severity", "")).upper()
+                        title = str(f.get("title", "")).lower()
+                        desc = str(f.get("description", "")).lower()
+                        if sev == "CRITICAL" or bool(f.get("canary_leaked")) or "leak" in title or "jailbreak" in title:
+                            logger.info("HITL triggered by detect_stage1 condition: %s", f)
                             return True
 
                     elif matched_threshold_key == "detect_stage3":
@@ -580,8 +606,10 @@ class GuardrailManager:
         addition."""
         stage_mappings = {
             ("identify", "risk_scoring"): "identify_stage3",
+            ("protect", "guardrail_proxy"): "protect_stage1",
             ("protect", "secrets_isolation"): "protect_stage3",
             ("protect", "policy_as_code"): "protect_stage3",
+            ("detect", "injection_detection"): "detect_stage1",
             ("detect", "red_teaming"): "detect_stage3",
             ("respond", "containment"): "respond_stage1",
             ("recover", "rollback"): "recover_stage1",
@@ -590,7 +618,9 @@ class GuardrailManager:
 
         V5_THRESHOLDS = {
             "identify_stage3": {"condition": "blast_radius == Critical", "confidence_floor": 85},
+            "protect_stage1": {"condition": "severity == Critical OR credential_exfiltrated / leak detected", "confidence_floor": 70},
             "protect_stage3": {"condition": "isolation_status == Exposed AND exposed_to_llm", "confidence_floor": 85},
+            "detect_stage1": {"condition": "canary_leaked == True OR severity == Critical", "confidence_floor": 70},
             "detect_stage3": {"condition": "outcome == Success AND severity == Critical", "confidence_floor": 80},
             "respond_stage1": {"condition": "severity == Critical", "confidence_floor": 85},
             "recover_stage1": {"condition": "reason is Critical-sourced", "confidence_floor": 85},
@@ -623,9 +653,19 @@ class GuardrailManager:
                     hit = False
                     if matched_threshold_key == "identify_stage3":
                         hit = str(f.get("blast_radius", f.get("severity", ""))).upper() == "CRITICAL"
+                    elif matched_threshold_key == "protect_stage1":
+                        sev = str(f.get("severity", "")).upper()
+                        title = str(f.get("title", "")).lower()
+                        desc = str(f.get("description", "")).lower()
+                        hit = sev == "CRITICAL" or "exfiltrat" in title or "leak" in title or "leak" in desc
                     elif matched_threshold_key == "protect_stage3":
                         isolation_status = str(f.get("isolation_status", "")).upper()
                         hit = bool(f.get("exposed_to_llm", False)) or isolation_status == "EXPOSED"
+                    elif matched_threshold_key == "detect_stage1":
+                        sev = str(f.get("severity", "")).upper()
+                        title = str(f.get("title", "")).lower()
+                        desc = str(f.get("description", "")).lower()
+                        hit = sev == "CRITICAL" or bool(f.get("canary_leaked")) or "leak" in title or "jailbreak" in title
                     elif matched_threshold_key == "detect_stage3":
                         hit = str(f.get("outcome", "")).upper() == "SUCCESS" and str(f.get("severity", "")).upper() == "CRITICAL"
                     elif matched_threshold_key == "respond_stage1":

@@ -93,7 +93,13 @@ STAGE_UI_CONFIG: Dict[str, Dict[str, Dict[str, Any]]] = {
             "filter_column": "category",
             "filter_options": ["Prompt Injection", "PII Redaction", "Toxic Content", "Jailbreak", "Off-Topic", "Data Exfiltration"],
             "chart": {"dataset": "guardrail_events", "column": "event_type", "type": "bar", "title": "Guardrail Events by Type"},
-            "hitl": None,
+            "hitl": {
+                "dataset": "guardrail_events",
+                "id_column": "event_id",
+                "label_template": "{event_id} — {event_type} ({action_taken}): {input_snippet_redacted}",
+                "match_column": "event_type",
+                "match_value": "credential_exfiltrated",
+            },
         },
         "least_privilege": {
             # Was event_type/guardrail-event values — that column doesn't
