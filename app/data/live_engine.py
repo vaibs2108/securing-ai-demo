@@ -646,9 +646,41 @@ class LiveDataEngine:
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }])
 
+        soar_playbooks = pd.DataFrame([
+            {
+                "playbook_id": "PB-001",
+                "playbook_name": "Automated Agent Runtime Quarantine",
+                "trigger_condition": "Critical Jailbreak / Exfiltration in Detect",
+                "success_rate": 98.5,
+                "avg_execution_time_s": 1.4,
+            },
+            {
+                "playbook_id": "PB-002",
+                "playbook_name": "Exposed Credential Rotation & Revocation",
+                "trigger_condition": "Unisolated Secret / Over-Provisioned Grant in Protect",
+                "success_rate": 100.0,
+                "avg_execution_time_s": 3.2,
+            },
+            {
+                "playbook_id": "PB-003",
+                "playbook_name": "Governance Policy Enforcement Escalation",
+                "trigger_condition": "Compliance Decision Blocked in Govern",
+                "success_rate": 95.0,
+                "avg_execution_time_s": 0.8,
+            },
+            {
+                "playbook_id": "PB-004",
+                "playbook_name": "Output Guardrail Deployment & Live Verification",
+                "trigger_condition": "Post-Incident Containment & Rollback in Recover",
+                "success_rate": 100.0,
+                "avg_execution_time_s": 2.1,
+            },
+        ])
+
         return {
             "incident_queue": incident_queue,
             "containment_actions": containment_actions,
+            "soar_playbooks": soar_playbooks,
         }
 
     # ── Recover — real config version history from the target repo ────────
