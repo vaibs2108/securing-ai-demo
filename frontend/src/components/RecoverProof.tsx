@@ -1,9 +1,22 @@
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
 
 export function RecoverProof() {
+  const qc = useQueryClient();
   const replayMut = useMutation({ mutationFn: api.replayDetect });
   const evidenceQ = useQuery({ queryKey: ["historical-leak-evidence"], queryFn: api.historicalLeakEvidence });
+  const [confirmed, setConfirmed] = useState(false);
+  const captureMut = useMutation({
+    mutationFn: api.captureHistoricalLeak,
+    onSuccess: (res) => {
+      setConfirmed(false);
+      // Only a real confirmed leak gets persisted server-side — a non-leak
+      // response means the historical-leak-evidence query is still exactly
+      // what it was, so nothing to refetch in that case.
+      if (res.captured) qc.invalidateQueries({ queryKey: ["historical-leak-evidence"] });
+    },
+  });
 
   return (
     <div style={{ marginBottom: 20 }}>
@@ -30,11 +43,39 @@ export function RecoverProof() {
               </p>
             </>
           ) : (
-            <p style={{ fontSize: "0.8rem", color: "var(--text-secondary)", margin: 0 }}>
-              No output-side guardrail existed. A real live Detect run confirmed the agent's internal API key could be
-              extracted via multiple real jailbreak techniques — see the real fix commit{" "}
-              <a href="https://github.com/vaibs2108/meridian-support-agent/commit/2b89c37" target="_blank" rel="noreferrer">2b89c37</a>.
-            </p>
+            <>
+              <p style={{ fontSize: "0.8rem", color: "var(--text-secondary)", margin: "0 0 8px" }}>
+                No output-side guardrail existed. A real live Detect run confirmed the agent's internal API key could
+                be extracted via multiple real jailbreak techniques — see the real fix commit{" "}
+                <a href="https://github.com/vaibs2108/meridian-support-agent/commit/2b89c37" target="_blank" rel="noreferrer">2b89c37</a>.
+              </p>
+              <label style={{ display: "flex", alignItems: "flex-start", gap: 6, fontSize: "0.74rem", cursor: "pointer", marginBottom: 8 }}>
+                <input
+                  type="checkbox" checked={confirmed}
+                  onChange={(e) => setConfirmed(e.target.checked)}
+                  disabled={captureMut.isPending}
+                  style={{ marginTop: 2 }}
+                />
+                I understand this briefly disables the real guardrail for one request to capture real "before" evidence
+              </label>
+              <button
+                className="btn btn-secondary btn-small"
+                disabled={!confirmed || captureMut.isPending}
+                onClick={() => captureMut.mutate()}
+              >
+                {captureMut.isPending ? "⏳ Guardrail off — capturing real evidence…" : "▶ Capture real evidence now"}
+              </button>
+              {captureMut.isError && (
+                <p style={{ fontSize: "0.74rem", color: "var(--accent-red)", marginTop: 8 }}>
+                  Couldn't reach the real agent. The guardrail restore still ran server-side regardless.
+                </p>
+              )}
+              {captureMut.data && !captureMut.data.captured && (
+                <p style={{ fontSize: "0.74rem", color: "var(--text-muted)", marginTop: 8 }}>
+                  No leak this attempt — real model behaviour isn't perfectly deterministic. Try again.
+                </p>
+              )}
+            </>
           )}
         </div>
 
