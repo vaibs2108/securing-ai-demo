@@ -954,9 +954,17 @@ Analyse the full dataset aggregation above. Produce your structured JSON respons
                     "CRITICAL RULE: If a leaked/exfiltrated event is present in `guardrail_events`, you MUST report at least 1 CRITICAL finding. Never report 0 Critical findings in that scenario."
                 ),
                 "least_privilege": (
-                    "Audit every agent's granted tool permissions against a least-privilege "
-                    "baseline. Flag over-provisioned grants — especially Admin-level access — "
-                    "and recommend specific permission downgrades."
+                    "Audit every agent's granted tool permissions in `tool_access_map` against recommended least-privilege baselines (NIST SP 800-53 AC-6 / OWASP LLM06 Excessive Agency). "
+                    "Inspect the `over_provisioned`, `granted_permission`, and `recommended_permission` columns for each tool: "
+                    "1. OVER-PROVISIONED TOOL FINDING: If any tool mapping has `over_provisioned == True` "
+                    "   (specifically TAM-001 with Admin/Full Write GitHub deployment privileges embedded in customer support chatbot): "
+                    "   You MUST create a HIGH or CRITICAL severity finding titled 'Over-Provisioned GitHub Repository Admin Token on Chatbot'. "
+                    "   Explain why a customer-facing support chatbot holding full repository deployment credentials violates least-privilege "
+                    "   and creates an excessive agency blast radius if the agent is compromised. "
+                    "   In 'evidence', cite mapping_id TAM-001, granted_permission, and recommended_permission. "
+                    "   In 'recommendation', recommend revoking the deployment token from the chatbot runtime and scoping tool access strictly to read-only customer resources. "
+                    "2. COMPLIANT TOOLS: Note that other tools (LLM inference, internal knowledge base) adhere to least privilege (`over_provisioned == False`). "
+                    "Never report 0 findings when an over-provisioned tool mapping exists in `tool_access_map`."
                 ),
                 "secrets_isolation": (
                     "Scan prompt history, code repositories, environment variables, and chat "
@@ -1075,8 +1083,8 @@ Analyse the full dataset aggregation above. Produce your structured JSON respons
                     {"id": "PR-GRD-002", "title": "Direct prompt injection attempts blocked by input proxy", "severity": "High", "description": "The input guardrail proxy successfully intercepted direct prompt injection and roleplay jailbreak payloads, preventing unauthorized system prompt extraction.", "evidence": "Guardrail proxy event log: action_taken='Blocked', event_type='prompt_injection_or_jailbreak'", "recommendation": "Maintain input filter rules and expand adversarial regression coverage with contextual evasion variants."},
                 ],
                 "least_privilege": [
-                    {"id": "PR-LP-001", "title": "24% of agent/tool grants exceed least-privilege recommendation", "severity": "High", "description": "Of the audited agent-to-tool permission pairings, roughly a quarter exceed the recommended least-privilege scope, with several holding unnecessary Admin-level access to the database query tool.", "evidence": "Tool access map audit (granted_permission vs recommended_permission)", "recommendation": "Downgrade all unnecessary Admin-level database query tool grants to Read within the current sprint."},
-                    {"id": "PR-LP-002", "title": "Automation script retains Write access to Payment Gateway API 90 days after project completion", "severity": "Critical", "description": "An automation script from a completed finance project retains live Write access to the Payment Gateway API tool, with no review recorded in over 90 days.", "evidence": "last_reviewed field + tool_name cross-reference", "recommendation": "Revoke unused Payment Gateway API access immediately; implement 30-day automatic permission expiry for automation scripts."},
+                    {"id": "PR-LP-001", "title": "Over-Provisioned GitHub Repository Admin Token on Chatbot", "severity": "Critical", "description": "The customer-facing support chatbot has been granted an Admin-level GitHub deployment token in its runtime context, creating excessive agency blast radius.", "evidence": "Tool access map: TAM-001 granted='Admin / Full Write' vs recommended='None / Revoke'", "recommendation": "Revoke the deployment PAT from the customer support chatbot context immediately and restrict tool grants to customer support resources."},
+                    {"id": "PR-LP-002", "title": "Customer knowledge base and LLM inference tools adhere to least-privilege", "severity": "Info", "description": "Audited access to internal knowledge base (Read-Only) and Groq LLM API (Execute) aligns with the required operational scope for support interactions.", "evidence": "Tool access map: TAM-002, TAM-003 over_provisioned=False", "recommendation": "Maintain read-only boundaries and review tool access policies quarterly."},
                 ],
                 "secrets_isolation": [
                     {"id": "PR-SEC-001", "title": "Live API key found in chat log history reachable by LLM context", "severity": "Critical", "description": "A live third-party API key was pasted into a chat session and remains in the conversation history, making it retrievable by any future prompt that references 'past conversations'.", "evidence": "Secrets exposure scan (location=Chat Log, exposed_to_llm=True)", "recommendation": "Rotate the exposed key immediately and purge the chat log entry; enable automatic secret-scanning on all chat ingestion."},

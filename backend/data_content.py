@@ -102,14 +102,21 @@ STAGE_UI_CONFIG: Dict[str, Dict[str, Dict[str, Any]]] = {
             },
         },
         "least_privilege": {
-            # Was event_type/guardrail-event values — that column doesn't
-            # exist on tool_access_map (this stage's real input, fixed in
-            # STAGE_INPUT_OUTPUT_MAP), so the filter silently returned zero
-            # rows for every option. Now matches the real input schema.
             "filter_column": "tool_name",
-            "filter_options": ["CRM API", "Database Query Tool", "Email Sender", "File System Access", "Payment Gateway API", "Code Execution Sandbox", "Internal Wiki Search", "Ticketing System API"],
-            "chart": {"dataset": "tool_access_map", "column": "tool_name", "type": "bar", "title": "Tool Access by Tool"},
-            "hitl": None,
+            "filter_options": [
+                "GitHub Deployment PAT (Embedded Secret)",
+                "LLM Inference API (Groq Cloud)",
+                "Internal Customer Knowledge Base",
+                "GitHub Repository Access",
+            ],
+            "chart": {"dataset": "tool_access_map", "column": "granted_permission", "type": "bar", "title": "Tool Grants by Permission Level"},
+            "hitl": {
+                "dataset": "tool_access_map",
+                "id_column": "mapping_id",
+                "label_template": "{mapping_id} — {tool_name}: {granted_permission} (Recommended: {recommended_permission})",
+                "match_column": "over_provisioned",
+                "match_value": True,
+            },
         },
         "secrets_isolation": {
             # Was tool_name/tool_access_map values — same zero-rows bug as

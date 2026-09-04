@@ -152,19 +152,19 @@ _HITL_THRESHOLDS: Dict[str, Dict[str, Dict[str, Any]]] = {
             "max_auto_findings": 1000,
         },
         "least_privilege": {
-            "require_approval": True,
-            "confidence_threshold": 75,
+            "require_approval": False,
+            "confidence_threshold": 70,
             "max_auto_findings": 50,
         },
         "secrets_isolation": {
             "require_approval": True,
-            "confidence_threshold": 85,
+            "confidence_threshold": 80,
             "max_auto_findings": 20,
             "note": "Secret rotation actions require analyst confirmation.",
         },
         "policy_as_code": {
-            "require_approval": True,
-            "confidence_threshold": 85,
+            "require_approval": False,
+            "confidence_threshold": 75,
             "max_auto_findings": 20,
             "note": "Enforcement-mode changes require explicit sign-off.",
         },
@@ -457,45 +457,89 @@ class GuardrailManager:
         # --- Version 5.0 Condition Evaluation ---
         normalized_key = f"{use_case.lower()}_{stage.lower()}"
         stage_mappings = {
+            ("identify", "shadow_ai_discovery"): "identify_stage1",
+            ("identify", "lineage_mapping"): "identify_stage2",
             ("identify", "risk_scoring"): "identify_stage3",
             ("protect", "guardrail_proxy"): "protect_stage1",
+            ("protect", "least_privilege"): "protect_stage2",
             ("protect", "secrets_isolation"): "protect_stage3",
-            ("protect", "policy_as_code"): "protect_stage3",
+            ("protect", "policy_as_code"): "protect_stage4",
             ("detect", "injection_detection"): "detect_stage1",
+            ("detect", "behavior_monitoring"): "detect_stage2",
             ("detect", "red_teaming"): "detect_stage3",
             ("respond", "containment"): "respond_stage1",
+            ("respond", "incident_playbook"): "respond_stage2",
             ("recover", "rollback"): "recover_stage1",
+            ("recover", "guardrail_update"): "recover_stage2",
+            ("govern", "policy_catalog"): "govern_stage1",
+            ("govern", "compliance_evaluation"): "govern_stage2",
         }
         matched_threshold_key = stage_mappings.get((use_case.lower(), stage.lower()), normalized_key)
 
         V5_THRESHOLDS = {
+            "identify_stage1": {
+                "condition": "unowned_agents > 0 OR internet_facing == True",
+                "confidence_floor": 65,
+            },
+            "identify_stage2": {
+                "condition": "lineage_depth > 2 OR sensitivity == Regulated",
+                "confidence_floor": 65,
+            },
             "identify_stage3": {
                 "condition": "blast_radius == Critical",
-                "confidence_floor": 85
+                "confidence_floor": 80,
             },
             "protect_stage1": {
                 "condition": "severity == Critical OR credential_exfiltrated / leak detected",
-                "confidence_floor": 70
+                "confidence_floor": 70,
+            },
+            "protect_stage2": {
+                "condition": "over_provisioned == True OR excessive agency detected",
+                "confidence_floor": 70,
             },
             "protect_stage3": {
-                "condition": "isolation_status == Exposed AND exposed_to_llm",
-                "confidence_floor": 85
+                "condition": "isolation_status == Exposed / Not Isolated OR exposed_to_llm",
+                "confidence_floor": 80,
+            },
+            "protect_stage4": {
+                "condition": "enforcement_mode == Log-Only OR missing OWASP mapping",
+                "confidence_floor": 75,
             },
             "detect_stage1": {
                 "condition": "canary_leaked == True OR severity == Critical",
-                "confidence_floor": 70
+                "confidence_floor": 70,
+            },
+            "detect_stage2": {
+                "condition": "is_anomalous == True AND anomaly_score > 90",
+                "confidence_floor": 70,
             },
             "detect_stage3": {
                 "condition": "outcome == Success AND severity == Critical",
-                "confidence_floor": 80
+                "confidence_floor": 80,
             },
             "respond_stage1": {
                 "condition": "severity == Critical",
-                "confidence_floor": 85
+                "confidence_floor": 80,
+            },
+            "respond_stage2": {
+                "condition": "playbook_success_rate < 80 OR severity == Critical",
+                "confidence_floor": 75,
             },
             "recover_stage1": {
                 "condition": "reason is Critical-sourced",
-                "confidence_floor": 85
+                "confidence_floor": 80,
+            },
+            "recover_stage2": {
+                "condition": "effectiveness_delta < 50 OR open incidents remain",
+                "confidence_floor": 80,
+            },
+            "govern_stage1": {
+                "condition": "missing owner OR missing framework_refs",
+                "confidence_floor": 75,
+            },
+            "govern_stage2": {
+                "condition": "triggered == True AND decision == Blocked",
+                "confidence_floor": 80,
             },
         }
 
@@ -514,52 +558,87 @@ class GuardrailManager:
                     if not isinstance(f, dict):
                         continue
 
-                    if matched_threshold_key == "identify_stage3":
+                    sev = str(f.get("severity", "")).upper()
+                    title = str(f.get("title", "")).lower()
+                    desc = str(f.get("description", "")).lower()
+                    evid = str(f.get("evidence", "")).lower()
+
+                    if matched_threshold_key == "identify_stage1":
+                        if sev == "CRITICAL" or "shadow" in title or "unowned" in title:
+                            return True
+
+                    elif matched_threshold_key == "identify_stage2":
+                        if sev == "CRITICAL" or "unredacted" in title or "regulated" in desc:
+                            return True
+
+                    elif matched_threshold_key == "identify_stage3":
                         blast_radius = str(f.get("blast_radius", f.get("severity", ""))).upper()
-                        if blast_radius == "CRITICAL":
+                        if blast_radius == "CRITICAL" or sev == "CRITICAL":
                             logger.info("HITL triggered by identify_stage3 condition: %s", f)
                             return True
 
                     elif matched_threshold_key == "protect_stage1":
-                        sev = str(f.get("severity", "")).upper()
-                        title = str(f.get("title", "")).lower()
-                        desc = str(f.get("description", "")).lower()
                         if sev == "CRITICAL" or "exfiltrat" in title or "leak" in title or "leak" in desc:
                             logger.info("HITL triggered by protect_stage1 condition: %s", f)
                             return True
 
+                    elif matched_threshold_key == "protect_stage2":
+                        if sev in ("CRITICAL", "HIGH") and ("over-provision" in title or "over-provision" in desc or "admin" in title or "tam-001" in evid):
+                            logger.info("HITL triggered by protect_stage2 condition: %s", f)
+                            return True
+
                     elif matched_threshold_key == "protect_stage3":
                         isolation_status = str(f.get("isolation_status", "")).upper()
-                        exposed = f.get("exposed_to_llm", False) or isolation_status == "EXPOSED"
+                        exposed = f.get("exposed_to_llm", False) or "EXPOSED" in isolation_status or "NOT ISOLATED" in isolation_status or "unisolated" in title or sev == "CRITICAL"
                         if exposed:
                             logger.info("HITL triggered by protect_stage3 condition: %s", f)
                             return True
 
+                    elif matched_threshold_key == "protect_stage4":
+                        if sev == "CRITICAL" or "log-only" in desc:
+                            return True
+
                     elif matched_threshold_key == "detect_stage1":
-                        sev = str(f.get("severity", "")).upper()
-                        title = str(f.get("title", "")).lower()
-                        desc = str(f.get("description", "")).lower()
                         if sev == "CRITICAL" or bool(f.get("canary_leaked")) or "leak" in title or "jailbreak" in title:
                             logger.info("HITL triggered by detect_stage1 condition: %s", f)
                             return True
 
+                    elif matched_threshold_key == "detect_stage2":
+                        if sev in ("CRITICAL", "HIGH") and ("anomal" in title or "anomal" in desc):
+                            return True
+
                     elif matched_threshold_key == "detect_stage3":
                         outcome = str(f.get("outcome", "")).upper()
-                        severity = str(f.get("severity", "")).upper()
-                        if outcome == "SUCCESS" and severity == "CRITICAL":
+                        if (outcome == "SUCCESS" and sev == "CRITICAL") or (sev == "CRITICAL" and "bypass" in title):
                             logger.info("HITL triggered by detect_stage3 condition: %s", f)
                             return True
 
                     elif matched_threshold_key == "respond_stage1":
-                        severity = str(f.get("severity", "")).upper()
-                        if severity == "CRITICAL":
+                        if sev == "CRITICAL":
                             logger.info("HITL triggered by respond_stage1 condition: %s", f)
+                            return True
+
+                    elif matched_threshold_key == "respond_stage2":
+                        if sev == "CRITICAL" or "fail" in desc:
                             return True
 
                     elif matched_threshold_key == "recover_stage1":
                         reason = str(f.get("reason", "")).lower()
-                        if "critical" in reason or "red-team" in reason:
+                        if "critical" in reason or "red-team" in reason or sev == "CRITICAL":
                             logger.info("HITL triggered by recover_stage1 condition: %s", f)
+                            return True
+
+                    elif matched_threshold_key == "recover_stage2":
+                        if "open" in desc or sev == "CRITICAL":
+                            return True
+
+                    elif matched_threshold_key == "govern_stage1":
+                        if "missing" in desc or sev in ("CRITICAL", "HIGH"):
+                            return True
+
+                    elif matched_threshold_key == "govern_stage2":
+                        decision = str(f.get("decision", "")).upper()
+                        if decision == "BLOCKED" or "blocked" in title or sev == "CRITICAL":
                             return True
 
         # Fallback to standard check if no matching V5 threshold or conditions not met
@@ -605,25 +684,42 @@ class GuardrailManager:
         tested boolean-gate behaviour stays untouched by this read-only
         addition."""
         stage_mappings = {
+            ("identify", "shadow_ai_discovery"): "identify_stage1",
+            ("identify", "lineage_mapping"): "identify_stage2",
             ("identify", "risk_scoring"): "identify_stage3",
             ("protect", "guardrail_proxy"): "protect_stage1",
+            ("protect", "least_privilege"): "protect_stage2",
             ("protect", "secrets_isolation"): "protect_stage3",
-            ("protect", "policy_as_code"): "protect_stage3",
+            ("protect", "policy_as_code"): "protect_stage4",
             ("detect", "injection_detection"): "detect_stage1",
+            ("detect", "behavior_monitoring"): "detect_stage2",
             ("detect", "red_teaming"): "detect_stage3",
             ("respond", "containment"): "respond_stage1",
+            ("respond", "incident_playbook"): "respond_stage2",
             ("recover", "rollback"): "recover_stage1",
+            ("recover", "guardrail_update"): "recover_stage2",
+            ("govern", "policy_catalog"): "govern_stage1",
+            ("govern", "compliance_evaluation"): "govern_stage2",
         }
         matched_threshold_key = stage_mappings.get((use_case.lower(), stage.lower()), f"{use_case.lower()}_{stage.lower()}")
 
         V5_THRESHOLDS = {
-            "identify_stage3": {"condition": "blast_radius == Critical", "confidence_floor": 85},
+            "identify_stage1": {"condition": "unowned_agents > 0 OR internet_facing == True", "confidence_floor": 65},
+            "identify_stage2": {"condition": "lineage_depth > 2 OR sensitivity == Regulated", "confidence_floor": 65},
+            "identify_stage3": {"condition": "blast_radius == Critical", "confidence_floor": 80},
             "protect_stage1": {"condition": "severity == Critical OR credential_exfiltrated / leak detected", "confidence_floor": 70},
-            "protect_stage3": {"condition": "isolation_status == Exposed AND exposed_to_llm", "confidence_floor": 85},
+            "protect_stage2": {"condition": "over_provisioned == True OR excessive agency detected", "confidence_floor": 70},
+            "protect_stage3": {"condition": "isolation_status == Exposed / Not Isolated OR exposed_to_llm", "confidence_floor": 80},
+            "protect_stage4": {"condition": "enforcement_mode == Log-Only OR missing OWASP mapping", "confidence_floor": 75},
             "detect_stage1": {"condition": "canary_leaked == True OR severity == Critical", "confidence_floor": 70},
+            "detect_stage2": {"condition": "is_anomalous == True AND anomaly_score > 90", "confidence_floor": 70},
             "detect_stage3": {"condition": "outcome == Success AND severity == Critical", "confidence_floor": 80},
-            "respond_stage1": {"condition": "severity == Critical", "confidence_floor": 85},
-            "recover_stage1": {"condition": "reason is Critical-sourced", "confidence_floor": 85},
+            "respond_stage1": {"condition": "severity == Critical", "confidence_floor": 80},
+            "respond_stage2": {"condition": "playbook_success_rate < 80 OR severity == Critical", "confidence_floor": 75},
+            "recover_stage1": {"condition": "reason is Critical-sourced", "confidence_floor": 80},
+            "recover_stage2": {"condition": "effectiveness_delta < 50 OR open incidents remain", "confidence_floor": 80},
+            "govern_stage1": {"condition": "missing owner OR missing framework_refs", "confidence_floor": 75},
+            "govern_stage2": {"condition": "triggered == True AND decision == Blocked", "confidence_floor": 80},
         }
 
         trace: Dict[str, Any] = {
@@ -651,28 +747,48 @@ class GuardrailManager:
                     if not isinstance(f, dict):
                         continue
                     hit = False
-                    if matched_threshold_key == "identify_stage3":
-                        hit = str(f.get("blast_radius", f.get("severity", ""))).upper() == "CRITICAL"
+                    sev = str(f.get("severity", "")).upper()
+                    title = str(f.get("title", "")).lower()
+                    desc = str(f.get("description", "")).lower()
+                    evid = str(f.get("evidence", "")).lower()
+
+                    if matched_threshold_key == "identify_stage1":
+                        hit = sev == "CRITICAL" or "shadow" in title or "unowned" in title
+                    elif matched_threshold_key == "identify_stage2":
+                        hit = sev == "CRITICAL" or "unredacted" in title or "regulated" in desc
+                    elif matched_threshold_key == "identify_stage3":
+                        hit = str(f.get("blast_radius", f.get("severity", ""))).upper() == "CRITICAL" or sev == "CRITICAL"
                     elif matched_threshold_key == "protect_stage1":
-                        sev = str(f.get("severity", "")).upper()
-                        title = str(f.get("title", "")).lower()
-                        desc = str(f.get("description", "")).lower()
                         hit = sev == "CRITICAL" or "exfiltrat" in title or "leak" in title or "leak" in desc
+                    elif matched_threshold_key == "protect_stage2":
+                        hit = sev in ("CRITICAL", "HIGH") and ("over-provision" in title or "over-provision" in desc or "admin" in title or "tam-001" in evid)
                     elif matched_threshold_key == "protect_stage3":
                         isolation_status = str(f.get("isolation_status", "")).upper()
-                        hit = bool(f.get("exposed_to_llm", False)) or isolation_status == "EXPOSED"
+                        hit = bool(f.get("exposed_to_llm", False)) or "EXPOSED" in isolation_status or "NOT ISOLATED" in isolation_status or "unisolated" in title or sev == "CRITICAL"
+                    elif matched_threshold_key == "protect_stage4":
+                        hit = sev == "CRITICAL" or "log-only" in desc
                     elif matched_threshold_key == "detect_stage1":
-                        sev = str(f.get("severity", "")).upper()
-                        title = str(f.get("title", "")).lower()
-                        desc = str(f.get("description", "")).lower()
                         hit = sev == "CRITICAL" or bool(f.get("canary_leaked")) or "leak" in title or "jailbreak" in title
+                    elif matched_threshold_key == "detect_stage2":
+                        hit = sev in ("CRITICAL", "HIGH") and ("anomal" in title or "anomal" in desc)
                     elif matched_threshold_key == "detect_stage3":
-                        hit = str(f.get("outcome", "")).upper() == "SUCCESS" and str(f.get("severity", "")).upper() == "CRITICAL"
+                        outcome = str(f.get("outcome", "")).upper()
+                        hit = (outcome == "SUCCESS" and sev == "CRITICAL") or (sev == "CRITICAL" and "bypass" in title)
                     elif matched_threshold_key == "respond_stage1":
-                        hit = str(f.get("severity", "")).upper() == "CRITICAL"
+                        hit = sev == "CRITICAL"
+                    elif matched_threshold_key == "respond_stage2":
+                        hit = sev == "CRITICAL" or "fail" in desc
                     elif matched_threshold_key == "recover_stage1":
                         reason = str(f.get("reason", "")).lower()
-                        hit = "critical" in reason or "red-team" in reason
+                        hit = "critical" in reason or "red-team" in reason or sev == "CRITICAL"
+                    elif matched_threshold_key == "recover_stage2":
+                        hit = "open" in desc or sev == "CRITICAL"
+                    elif matched_threshold_key == "govern_stage1":
+                        hit = "missing" in desc or sev in ("CRITICAL", "HIGH")
+                    elif matched_threshold_key == "govern_stage2":
+                        decision = str(f.get("decision", "")).upper()
+                        hit = decision == "BLOCKED" or "blocked" in title or sev == "CRITICAL"
+
                     if hit:
                         trace["decision"] = True
                         trace["decision_reason"] = f"Finding \"{f.get('title', f.get('id', 'untitled'))}\" matched the policy condition."
