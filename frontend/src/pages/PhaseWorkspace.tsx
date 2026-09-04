@@ -583,13 +583,24 @@ export function PhaseWorkspace() {
                       <div style={{ fontSize: "0.68rem", textTransform: "uppercase", letterSpacing: "0.04em", color: "var(--text-muted)", fontWeight: 700, marginBottom: 4 }}>
                         🔄 Handoff Note
                       </div>
-                      {/^[\[{]/.test(outcome.passed_to_next_stage.trim()) ? (
-                        <pre style={{ fontSize: "0.76rem", color: "var(--text-secondary)", whiteSpace: "pre-wrap", wordBreak: "break-word", margin: 0, fontFamily: "JetBrains Mono, monospace" }}>
-                          {outcome.passed_to_next_stage}
-                        </pre>
-                      ) : (
-                        <p style={{ fontSize: "0.85rem", color: "var(--text-secondary)", margin: 0 }}>{outcome.passed_to_next_stage}</p>
-                      )}
+                      {(() => {
+                        const trimmed = outcome.passed_to_next_stage.trim();
+                        let formatted = trimmed;
+                        try {
+                          if (/^[\[{]/.test(trimmed)) {
+                            formatted = JSON.stringify(JSON.parse(trimmed), null, 2);
+                          }
+                        } catch {
+                          formatted = trimmed;
+                        }
+                        return /^[\[{]/.test(trimmed) ? (
+                          <pre style={{ fontSize: "0.76rem", color: "var(--text-secondary)", whiteSpace: "pre-wrap", wordBreak: "break-word", margin: 0, fontFamily: "JetBrains Mono, monospace", background: "rgba(0,0,0,0.2)", padding: 10, borderRadius: 6 }}>
+                            {formatted}
+                          </pre>
+                        ) : (
+                          <p style={{ fontSize: "0.85rem", color: "var(--text-secondary)", margin: 0 }}>{outcome.passed_to_next_stage}</p>
+                        );
+                      })()}
                     </div>
                   )}
                 </GlassCard>
