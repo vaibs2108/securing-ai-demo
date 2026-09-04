@@ -1023,9 +1023,9 @@ Analyse the full dataset aggregation above. Produce your structured JSON respons
             },
             "recover": {
                 "rollback": (
-                    "Identify the last known-good config snapshot for an affected agent in `config_snapshots` and audit the executed rollback in `rollback_events`. "
-                    "Report on the rollback operation from the suspended/contained state to hardened version `2b89c37` where output guardrails were deployed. "
-                    "State the explicit reason for rollback and provide at least 1 structured finding confirming that the rollback operation restored the agent to a known-good configuration with output guardrail defenses."
+                    "Identify the last known-good config snapshot (prompt template, guardrail "
+                    "policy, or model config) for an affected agent and execute rollback. "
+                    "State the explicit reason for rollback and the resulting outcome."
                 ),
                 "guardrail_update": (
                     "Convert red-team and incident root causes into deployed guardrail policy "
@@ -1130,8 +1130,8 @@ Analyse the full dataset aggregation above. Produce your structured JSON respons
             },
             "recover": {
                 "rollback": [
-                    {"id": "RC-RBK-001", "title": "Successful Agent Rollback to Hardened Snapshot 2b89c37", "severity": "Info", "description": "The agent was successfully rolled back from suspended containment to last known-good snapshot 2b89c37, where output guardrail filtering is enabled. The fix was verified locally against prompt injection payloads.", "evidence": "rollback_events RB-2026-09-01-001 (outcome=Success, target_version=2b89c37)", "recommendation": "Use 'Replay this attack now' to verify live payload interception."},
-                    {"id": "RC-RBK-002", "title": "Commit Snapshots Verified for Continuous Rollback Availability", "severity": "Low", "description": "All tracked Git commit snapshots retain parent linkages, ensuring clean reversion paths for future incidents.", "evidence": "config_snapshots rollback_available=True", "recommendation": "Maintain automated snapshotting on every production release."},
+                    {"id": "RC-RBK-001", "title": "88% of rollback operations completed cleanly to last known-good version", "severity": "Info", "description": "The large majority of rollback operations completed cleanly, reverting affected agents' prompt templates or guardrail policies to their last known-good snapshot.", "evidence": "Rollback event log outcome=Success aggregation", "recommendation": "No action required for successful rollbacks. Investigate the remaining partial/failed rollbacks for missing snapshot dependencies."},
+                    {"id": "RC-RBK-002", "title": "10% of agents have no rollback-ready snapshot available", "severity": "High", "description": "A subset of tracked agent configurations have no rollback-available snapshot, meaning a compromised config for these agents cannot currently be reverted automatically.", "evidence": "Config snapshot rollback_available=False audit", "recommendation": "Establish mandatory pre-deployment snapshotting for all agent config changes going forward."},
                 ],
                 "guardrail_update": [
                     {"id": "RC-UPD-001", "title": "Guardrail update closed the multi-turn jailbreak gap identified in Detect phase", "severity": "Info", "description": "Following the red-team finding of a meaningful multi-turn jailbreak bypass rate, a guardrail policy update adding multi-turn context tracking was deployed, improving the measured block rate.", "evidence": "Guardrail update log effectiveness_delta + source_finding=Redteam Campaign", "recommendation": "No action required — closed-loop update deployed successfully. Schedule a follow-up red-team validation in 30 days."},
