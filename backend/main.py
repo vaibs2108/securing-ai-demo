@@ -501,6 +501,38 @@ def _maybe_augment_with_live_mcp(uc: str, stage_key: str, data_source: str) -> D
                 # that KPI reflected before, no matter how thorough a real
                 # scan you'd just run.
                 state.datasets[f"{tool_name}_live_scan"] = scan_df
+
+                # Propagate confirmed findings to redteam_campaign_results and Govern
+                any_leaked = any(bool(f.get("canary_leaked") or f.get("model_leaked_raw")) for f in findings if isinstance(f, dict))
+                if any_leaked:
+                    try:
+                        from datetime import datetime, timezone
+                        from app.data.live_engine import _AGENT_ID
+                        redteam = state.datasets.get("redteam_campaign_results")
+                        rt_rows = redteam.to_dict("records") if redteam is not None and not redteam.empty else []
+                        for f in findings:
+                            if isinstance(f, dict) and (f.get("canary_leaked") or f.get("model_leaked_raw")):
+                                rt_rows.append({
+                                    "test_id": f"{tool_name.upper()}-{uuid.uuid4().hex[:6]}",
+                                    "campaign_id": f"CAMP-LIVE-{tool_name.upper()}",
+                                    "campaign_name": f"Live {tool_name.title()} Vulnerability Assessment",
+                                    "agent_id": _AGENT_ID,
+                                    "outcome": "Success",
+                                    "severity": "Critical" if f.get("canary_leaked") else "High",
+                                    "technique": f.get("probe") or f.get("category") or f"{tool_name} automated probe",
+                                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                                })
+                        state.datasets["redteam_campaign_results"] = pd.DataFrame(rt_rows)
+                        if "governance_compliance_evaluation" in state.datasets:
+                            gov_df = state.datasets["governance_compliance_evaluation"].copy()
+                            mask = gov_df["rule_id"] == "GOV-002"
+                            if mask.any():
+                                gov_df.loc[mask, "triggered"] = True
+                                gov_df.loc[mask, "decision"] = "Blocked"
+                                gov_df.loc[mask, "evidence"] = f"Live {tool_name.title()} scan confirmed real secret leakage against live target agent."
+                                state.datasets["governance_compliance_evaluation"] = gov_df
+                    except Exception as exc:
+                        logging.getLogger(__name__).warning("Failed to propagate %s live findings to redteam/govern: %s", tool_name, exc)
         state.recompute_kpis()
 
     return extra
@@ -528,6 +560,12 @@ def run_stage(uc: str, stage_key: str, body: RunStageRequest, user: dict = Depen
     # shows the Rollback Event Log as the primary displayed input.
     if uc == "recover" and stage_key == "guardrail_update" and "incident_queue" not in input_keys:
         input_keys.append("incident_queue")
+
+    if uc == "recover":
+        try:
+            state.mcp_client.target_agent_set_guardrail_enabled(True)
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Failed to enable target agent guardrail during recover stage: %s", exc)
 
     outcome = state.agent_manager.run_stage(
         uc, stage_key, datasets_for_run, body.data_source,
@@ -580,9 +618,17 @@ def run_stage(uc: str, stage_key: str, body: RunStageRequest, user: dict = Depen
 # limited to actions against our own demo target agent, never anything that
 # touches repo collaborator access (see AGENTS.md's explicit safety note on
 # why github_revoke_collaborator is never wired to auto-execute here).
+def _restore_and_secure_agent() -> Dict[str, Any]:
+    try:
+        state.mcp_client.target_agent_set_guardrail_enabled(True)
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Failed to enable guardrail on target agent during restore: %s", exc)
+    return state.mcp_client.target_agent_set_disabled(False)
+
+
 _REAL_ACTION_EXECUTORS = {
     "suspend_target_agent": lambda: state.mcp_client.target_agent_set_disabled(True),
-    "restore_target_agent": lambda: state.mcp_client.target_agent_set_disabled(False),
+    "restore_target_agent": _restore_and_secure_agent,
 }
 
 
@@ -629,6 +675,12 @@ def replay_detect(user: dict = Depends(get_current_user)) -> Dict[str, Any]:
     real deployed target agent right now, and checks the real reply for the
     real canary. Reprovable on demand — not a stored screenshot."""
     from app.data.live_engine import REAL_INJECTION_PAYLOADS, _canary_leaked
+
+    # Explicitly ensure the output guardrail is deployed and active for the replay proof!
+    try:
+        state.mcp_client.target_agent_set_guardrail_enabled(True)
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Failed to deploy output guardrail during replay-detect: %s", exc)
 
     payload = REAL_INJECTION_PAYLOADS[0]
     try:
@@ -893,6 +945,8 @@ def guardrail_proxy_chat(body: GuardrailProxyChatRequest, user: dict = Depends(g
         raise HTTPException(status_code=502, detail=f"Couldn't reach the real target agent: {exc}")
     reply = result.get("reply") or ""
     model_leaked_raw = bool(result.get("model_leaked_raw", False))
+    from app.data.live_engine import _canary_leaked
+    canary_leaked = _canary_leaked(reply)
 
     output_screen = state.mcp_client.screen_prompt(reply) if reply else {"live": input_screen.get("live"), "flagged": False}
     if output_screen.get("flagged"):
@@ -902,7 +956,44 @@ def guardrail_proxy_chat(body: GuardrailProxyChatRequest, user: dict = Depends(g
             username=user["u"], status="Redacted", target="meridian-support-agent",
             details="Real Lakera Guard flagged the real target agent's real reply — withheld from the caller.",
         )
-        return {"blocked": True, "blocked_at": "output", "lakera_input": input_screen, "lakera_output": output_screen, "reply": "[REDACTED BY GUARDRAIL PROXY]", "event": event, "model_leaked_raw": model_leaked_raw}
+        return {"blocked": True, "blocked_at": "output", "lakera_input": input_screen, "lakera_output": output_screen, "reply": "[REDACTED BY GUARDRAIL PROXY]", "event": event, "model_leaked_raw": model_leaked_raw, "canary_leaked": False}
+
+    if canary_leaked:
+        event = _log_event("credential_exfiltrated", "Leaked (Gaps in Output Control)")
+        AuditLogger().log_action(
+            action="Real Guardrail Proxy — Exfiltration Detected",
+            username=user["u"], status="Leaked", target="meridian-support-agent",
+            details="Prompt bypassed input screening; target agent output guardrail inactive — confidential credential leaked.",
+        )
+        # Update redteam_campaign_results so Govern immediately sees that an active leak occurred
+        try:
+            redteam = state.datasets.get("redteam_campaign_results")
+            rows = redteam.to_dict("records") if redteam is not None and not redteam.empty else []
+            rows.append({
+                "test_id": f"PROXY-LEAK-{uuid.uuid4().hex[:6]}",
+                "campaign_id": "CAMP-LIVE-PROXY",
+                "campaign_name": "Guardrail Proxy Evasion Bypass",
+                "agent_id": _AGENT_ID,
+                "outcome": "Success",
+                "severity": "Critical",
+                "technique": "Evasion Bypass (Prompt-Injection Slipthrough)",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+            state.datasets["redteam_campaign_results"] = pd.DataFrame(rows)
+            # Recompute Govern compliance so GOV-002 immediately shows Blocked
+            if "governance_compliance_evaluation" in state.datasets:
+                gov_df = state.datasets["governance_compliance_evaluation"].copy()
+                mask = gov_df["rule_id"] == "GOV-002"
+                if mask.any():
+                    gov_df.loc[mask, "triggered"] = True
+                    gov_df.loc[mask, "decision"] = "Blocked"
+                    gov_df.loc[mask, "evidence"] = "Live prompt injection through Guardrail Proxy successfully extracted confidential credential (real canary leak confirmed)."
+                    state.datasets["governance_compliance_evaluation"] = gov_df
+            state.recompute_kpis()
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Failed to update redteam_campaign_results on proxy leak: %s", exc)
+
+        return {"blocked": False, "lakera_input": input_screen, "lakera_output": output_screen, "reply": reply, "event": event, "model_leaked_raw": model_leaked_raw, "canary_leaked": True}
 
     event = _log_event("clean", "Allowed")
     AuditLogger().log_action(
@@ -910,7 +1001,7 @@ def guardrail_proxy_chat(body: GuardrailProxyChatRequest, user: dict = Depends(g
         username=user["u"], status="Allowed", target="meridian-support-agent",
         details="Real prompt passed both real input and output Lakera screens; real reply returned to caller.",
     )
-    return {"blocked": False, "lakera_input": input_screen, "lakera_output": output_screen, "reply": reply, "event": event, "model_leaked_raw": model_leaked_raw}
+    return {"blocked": False, "lakera_input": input_screen, "lakera_output": output_screen, "reply": reply, "event": event, "model_leaked_raw": model_leaked_raw, "canary_leaked": False}
 
 
 def _categorize_scan_finding(row: Dict[str, Any]) -> str:

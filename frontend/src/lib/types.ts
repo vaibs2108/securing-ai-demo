@@ -253,6 +253,7 @@ export interface GuardrailProxyChatResult {
   // screen, or the target's own output check) touched it? Only set when the
   // real target agent was actually called (i.e. not set on an input block).
   model_leaked_raw?: boolean;
+  canary_leaked?: boolean;
 }
 
 export interface ReplayDetectResponse {

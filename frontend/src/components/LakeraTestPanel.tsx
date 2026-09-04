@@ -44,20 +44,25 @@ export function LakeraTestPanel({ onSent }: { onSent?: () => void }) {
 
       <label className="field-label">Quick real examples (or write your own below)</label>
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
-        {prompts.map((p) => (
-          <button
-            key={p.prompt_id}
-            type="button"
-            onClick={() => { setPrompt(p.payload); chatMut.reset(); }}
-            style={{
-              all: "unset", cursor: "pointer", padding: "6px 10px", borderRadius: 8,
-              background: "rgba(var(--overlay-rgb), 0.03)", border: "1px solid var(--border-glass)",
-              fontSize: "0.74rem", fontWeight: 700, color: "var(--text-heading)",
-            }}
-          >
-            {p.category}
-          </button>
-        ))}
+        {prompts.map((p) => {
+          const isEvasion = p.prompt_id === "PROMPT-004";
+          return (
+            <button
+              key={p.prompt_id}
+              type="button"
+              onClick={() => { setPrompt(p.payload); chatMut.reset(); }}
+              style={{
+                all: "unset", cursor: "pointer", padding: "6px 10px", borderRadius: 8,
+                background: isEvasion ? "rgba(255, 170, 0, 0.12)" : "rgba(var(--overlay-rgb), 0.03)",
+                border: `1px solid ${isEvasion ? "var(--accent-amber)" : "var(--border-glass)"}`,
+                fontSize: "0.74rem", fontWeight: 700,
+                color: isEvasion ? "var(--accent-amber)" : "var(--text-heading)",
+              }}
+            >
+              {isEvasion ? `🎯 ${p.category}` : p.category}
+            </button>
+          );
+        })}
       </div>
 
       <label className="field-label">Prompt to send through the real proxy</label>
@@ -81,12 +86,14 @@ export function LakeraTestPanel({ onSent }: { onSent?: () => void }) {
         <div
           style={{
             marginTop: 12, padding: "10px 12px", borderRadius: 8,
-            background: chatMut.data.blocked ? "rgba(255,68,68,0.08)" : "rgba(0,255,136,0.06)",
-            border: `1px solid ${chatMut.data.blocked ? "var(--accent-red)" : "var(--accent-green)"}33`,
+            background: chatMut.data.canary_leaked ? "rgba(255,68,68,0.12)" : chatMut.data.blocked ? "rgba(255,68,68,0.08)" : "rgba(0,255,136,0.06)",
+            border: `1px solid ${chatMut.data.canary_leaked || chatMut.data.blocked ? "var(--accent-red)" : "var(--accent-green)"}33`,
           }}
         >
-          <div style={{ fontWeight: 700, fontSize: "0.85rem", color: chatMut.data.blocked ? "var(--accent-red)" : "var(--accent-green)" }}>
-            {chatMut.data.blocked
+          <div style={{ fontWeight: 700, fontSize: "0.85rem", color: chatMut.data.canary_leaked || chatMut.data.blocked ? "var(--accent-red)" : "var(--accent-green)" }}>
+            {chatMut.data.canary_leaked
+              ? "⚠️ EXFILTRATION DETECTED — Input screening bypassed, secret leaked"
+              : chatMut.data.blocked
               ? chatMut.data.blocked_at === "input"
                 ? "🚫 Blocked at input — never reached the real target agent"
                 : "🚫 Blocked at output — real agent replied, but the reply was withheld"
@@ -95,7 +102,7 @@ export function LakeraTestPanel({ onSent }: { onSent?: () => void }) {
 
           {chatMut.data.lakera_input && (
             <div style={{ fontSize: "0.72rem", color: "var(--text-muted)", marginTop: 6 }}>
-              Real Lakera input verdict: {chatMut.data.lakera_input.flagged ? "flagged" : "clear"}
+              Real Lakera input verdict: {chatMut.data.lakera_input.flagged ? "flagged (blocked)" : "clear (allowed through)"}
               {chatMut.data.lakera_input.raw?.metadata?.request_uuid && ` (request_uuid: ${chatMut.data.lakera_input.raw.metadata.request_uuid})`}
             </div>
           )}
@@ -112,14 +119,24 @@ export function LakeraTestPanel({ onSent }: { onSent?: () => void }) {
             </div>
           )}
 
-          {chatMut.data.model_leaked_raw && (
+          {chatMut.data.canary_leaked ? (
+            <div
+              style={{
+                marginTop: 8, padding: "8px 10px", borderRadius: 6,
+                background: "rgba(255, 68, 68, 0.15)", border: "1px solid var(--accent-red)",
+                color: "var(--accent-red)", fontSize: "0.74rem",
+              }}
+            >
+              <strong>Live Security Breach:</strong> The prompt bypassed input screening and extracted the confidential credential from the model. Target agent output guardrails are currently unhardened.
+            </div>
+          ) : chatMut.data.model_leaked_raw ? (
             <div style={{ fontSize: "0.72rem", color: "var(--accent-amber)", marginTop: 8 }}>
               🎯 The real target agent's underlying model actually generated the confidential credential for this
               prompt — a genuine jailbreak at the model level. {chatMut.data.blocked
                 ? "This proxy's own Lakera screen is what kept it from reaching you."
                 : "The target's own output guardrail already substituted it before this proxy even saw the reply."}
             </div>
-          )}
+          ) : null}
 
           <div style={{ fontSize: "0.68rem", color: "var(--text-muted)", marginTop: 8, fontFamily: "JetBrains Mono, monospace" }}>
             real event logged: {chatMut.data.event.event_id} · {chatMut.data.event.action_taken} · see Output & Handoff below

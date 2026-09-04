@@ -111,6 +111,22 @@ class AppState:
                 )
             else:
                 logger.info("Target agent healthz check: already enabled.")
+
+            # Phase-aware demo lifecycle: start with output guardrail disabled so Protect
+            # and Detect demonstrate real live vulnerability and data leakage, which are
+            # then contained in Respond and remediated in Recover.
+            if health.get("guardrail_enabled"):
+                logger.info("Target agent guardrail is enabled; setting to disabled for live demo vulnerability progression.")
+                self.mcp_client.target_agent_set_guardrail_enabled(False)
+                AuditLogger().log_action(
+                    action="Target Agent Guardrail Initialized to Vulnerable Baseline",
+                    username="system",
+                    status="Success",
+                    target=os.getenv("TARGET_AGENT_URL", ""),
+                    details="Target agent output guardrail set to disabled at startup so Protect/Detect demonstrate live vulnerabilities before Recover remediation.",
+                )
+            else:
+                logger.info("Target agent guardrail already in vulnerable baseline state.")
         except Exception:
             logger.exception("Target agent startup health check failed — leaving as-is; Identify's real fetch will surface any real connectivity issue.")
 
