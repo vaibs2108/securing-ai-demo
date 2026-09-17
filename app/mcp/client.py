@@ -359,7 +359,18 @@ class MCPClient:
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 503:
                 return {"reply": None, "provider": provider, "disabled": True}
-            raise MCPClient.LiveConnectorError(f"target_agent /chat failed: {exc.response.status_code} {exc.response.text[:300]}") from exc
+            status = exc.response.status_code
+            content_type = exc.response.headers.get("content-type", "")
+            body = exc.response.text
+            # A platform gateway error (Render, etc.) returns its own HTML error
+            # page, not anything from the target agent — dumping that raw HTML/CSS
+            # into the UI is noise, not information. Summarize it instead.
+            if "html" in content_type.lower() or body.lstrip().startswith(("<!DOCTYPE", "<html")):
+                hint = " — the target agent may be cold-starting (free-tier services sleep after ~15 min idle); try again shortly" if status in (502, 503, 504) else ""
+                detail = f"{status} (gateway returned an HTML error page{hint})"
+            else:
+                detail = f"{status} {body[:300]}"
+            raise MCPClient.LiveConnectorError(f"target_agent /chat failed: {detail}") from exc
         except httpx.HTTPError as exc:
             raise MCPClient.LiveConnectorError(f"target_agent /chat failed: {exc}") from exc
 
