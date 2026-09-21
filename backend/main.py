@@ -1506,6 +1506,17 @@ def save_settings(body: SettingsRequest, user: dict = Depends(get_current_user))
     return {"saved": True, "reloaded": retarget, "fetch_errors": state.fetch_errors if retarget else None}
 
 
+@app.post("/api/live-data/reload")
+def reload_live_data(user: dict = Depends(get_current_user)) -> Dict[str, Any]:
+    """Re-runs the real live data fetch against the current target without
+    needing a restart or a changed target repo. Fetch errors are cached from
+    the last run (e.g. startup, which can lose a race with a cold free-tier
+    target agent), so a transient failure would otherwise stay frozen until
+    the next process restart."""
+    state.reload_datasets()
+    return {"reloaded": True, "fetch_errors": state.fetch_errors or None}
+
+
 class ChangeCredentialsRequest(BaseModel):
     current_password: str
     new_username: Optional[str] = None

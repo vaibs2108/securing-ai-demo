@@ -158,6 +158,8 @@ export const api = {
       target_agent_reachable: boolean;
       target_agent_disabled: boolean;
     }>("/settings"),
+  reloadLiveData: () =>
+    request<{ reloaded: boolean; fetch_errors: Record<string, string> | null }>("/live-data/reload", { method: "POST" }),
   saveSettings: (body: Record<string, unknown>) =>
     request<{ saved: boolean; reloaded: boolean; fetch_errors: Record<string, string> | null }>("/settings", {
       method: "POST",

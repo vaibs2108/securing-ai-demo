@@ -132,6 +132,13 @@ export function PhaseWorkspace() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["phase-state", phase] }),
   });
 
+  // Every dataset (and the row counts/previews/dashboard derived from them)
+  // was just re-fetched server-side, so nothing cached client-side is safe.
+  const reloadMut = useMutation({
+    mutationFn: api.reloadLiveData,
+    onSuccess: () => qc.invalidateQueries(),
+  });
+
   const runMut = useMutation({
     mutationFn: (args: { stageKey: string; silent?: boolean }) => api.runStage(phase, args.stageKey, dataSource[args.stageKey] ?? "live"),
     onSuccess: (res, args) => {
@@ -285,6 +292,12 @@ export function PhaseWorkspace() {
                 {fetchError && (
                   <div style={{ background: "rgba(255,68,68,0.08)", border: "1px solid var(--accent-red)", borderRadius: 8, padding: "8px 10px", marginBottom: 10, fontSize: "0.76rem", color: "var(--accent-red)" }}>
                     ⚠️ Couldn't fetch real {phase} data from this target: {fetchError}
+                    <div style={{ marginTop: 8 }}>
+                      <button className="btn btn-secondary btn-small" onClick={() => reloadMut.mutate()} disabled={reloadMut.isPending}>
+                        {reloadMut.isPending ? "Retrying — waiting for the target to respond…" : "🔄 Retry live data fetch"}
+                      </button>
+                      {reloadMut.isError && <span style={{ marginLeft: 8 }}>Retry failed — try again in a moment.</span>}
+                    </div>
                   </div>
                 )}
                 <div className="radio-group" style={{ marginBottom: 12 }}>

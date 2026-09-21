@@ -10,6 +10,7 @@ live data.
 from __future__ import annotations
 
 import base64
+import logging
 import os
 import random
 import time
@@ -19,6 +20,8 @@ import httpx
 
 from app.mcp.registry import MCPToolRegistry, MCPToolMetadata
 from app.observability.audit_logger import AuditLogger
+
+logger = logging.getLogger(__name__)
 
 _TIMEOUT = 15.0
 
@@ -384,6 +387,28 @@ class MCPClient:
         resp = httpx.get(f"{base}/healthz", timeout=_TIMEOUT)
         resp.raise_for_status()
         return resp.json()
+
+    def wait_for_target_agent(self, max_wait: float = 90.0, interval: float = 5.0) -> Dict[str, Any]:
+        """Polls /healthz until the target agent actually answers, then
+        returns its health dict. A host that has spun down (Render's free tier
+        after ~15 min idle) refuses connections or returns gateway 502/503/504
+        for the first 30-60s+ of a cold start — a single-shot startup fetch
+        loses that race and freezes the failure until the next restart.
+        Only transport/HTTP errors are retried; a missing TARGET_AGENT_URL
+        (a config error, not a timing one) still raises immediately. Raises
+        the last error if the agent still isn't up after max_wait."""
+        deadline = time.monotonic() + max_wait
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                return self.target_agent_healthz()
+            except httpx.HTTPError as exc:
+                if time.monotonic() + interval >= deadline:
+                    logger.warning("Target agent still not answering after %.0fs (%d attempts): %s", max_wait, attempt, exc)
+                    raise
+                logger.info("Target agent not up yet (attempt %d, likely cold-starting): %s — retrying in %.0fs", attempt, exc, interval)
+                time.sleep(interval)
 
     def target_agent_set_disabled(self, disabled: bool) -> Dict[str, Any]:
         """Real Respond (disable) / Recover (enable) action against the real deployed target agent."""

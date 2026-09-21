@@ -432,6 +432,11 @@ class LiveDataEngine:
         telemetry_rows: List[dict] = []
         campaign_rows: List[dict] = []
 
+        # A retry/reload can land while a free-tier target is cold again —
+        # wait for it to answer before the first real /chat call instead of
+        # caching a gateway 502 (cheap no-op when it's already awake).
+        self.client.wait_for_target_agent()
+
         # One real benign call first — gives behaviour telemetry a real
         # normal-baseline row alongside the real attack rows below.
         benign = self.client.target_agent_chat(

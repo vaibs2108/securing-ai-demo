@@ -98,7 +98,10 @@ class AppState:
         block the rest of startup — Identify's real fetch will surface that
         separately."""
         try:
-            health = self.mcp_client.target_agent_healthz()
+            # Waits out a free-tier cold start instead of losing the race to it —
+            # otherwise this best-effort check fails, and the Detect fetch right
+            # after hits the same still-booting agent and caches a 502.
+            health = self.mcp_client.wait_for_target_agent()
             if health.get("disabled"):
                 logger.warning("Target agent was left disabled from a prior session — restoring it now.")
                 self.mcp_client.target_agent_set_disabled(False)
