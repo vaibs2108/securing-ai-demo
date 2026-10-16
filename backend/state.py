@@ -10,8 +10,10 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
 from typing import Any, Dict, List, Optional
 
+import httpx
 import pandas as pd
 
 logger = logging.getLogger(__name__)
@@ -30,6 +32,7 @@ from backend.rag_service import RAGService
 class AppState:
     def __init__(self) -> None:
         self._lock = threading.Lock()
+        self._target_watcher_running = False
         self.datasets: Dict[str, pd.DataFrame] = {}
         self.fetch_errors: Dict[str, str] = {}
         self.kpi_engine: Optional[KPIEngine] = None
@@ -88,7 +91,7 @@ class AppState:
         self._init_llm_router()
         self.rag.build_dataset_index_async(self.datasets)
 
-    def _ensure_target_agent_enabled(self) -> None:
+    def _ensure_target_agent_enabled(self, recover_in_background: bool = True) -> None:
         """Self-heals a target agent left disabled by a prior session's real
         Respond containment test (target_agent_set_disabled(True)) — so
         every fresh backend start begins from a known-good state instead of
@@ -130,8 +133,46 @@ class AppState:
                 )
             else:
                 logger.info("Target agent guardrail already in vulnerable baseline state.")
+        except httpx.HTTPError as exc:
+            # Expected on a cold/throttled free-tier target — not worth a traceback.
+            # Startup carries on; the watcher below reloads live data the moment
+            # the target actually answers, so no manual retry is needed.
+            logger.warning("Target agent not reachable at startup (%s) — continuing; retrying in the background.", exc)
+            if recover_in_background:
+                self._start_target_recovery_watcher()
         except Exception:
             logger.exception("Target agent startup health check failed — leaving as-is; Identify's real fetch will surface any real connectivity issue.")
+
+    def _start_target_recovery_watcher(self) -> None:
+        if self._target_watcher_running:
+            return
+        self._target_watcher_running = True
+        threading.Thread(target=self._recover_target_agent, name="target-agent-recovery", daemon=True).start()
+
+    def _recover_target_agent(self, give_up_after: float = 900.0) -> None:
+        """Background retry for a target that was down/throttled at startup:
+        polls /healthz with growing backoff and, once it answers, re-runs the
+        startup checks and re-fetches every dataset (Detect's included), so a
+        transient cold-start failure heals itself instead of staying frozen
+        in fetch_errors until someone restarts or clicks Retry."""
+        deadline = time.monotonic() + give_up_after
+        delay = 15.0
+        try:
+            while time.monotonic() < deadline:
+                time.sleep(delay)
+                try:
+                    self.mcp_client.target_agent_healthz()
+                except Exception as exc:
+                    logger.info("Target agent still unreachable (%s) — next check in %.0fs.", exc, min(delay * 1.5, 60.0))
+                    delay = min(delay * 1.5, 60.0)
+                    continue
+                logger.info("Target agent reachable again — re-running startup checks and reloading live data.")
+                self._ensure_target_agent_enabled(recover_in_background=False)
+                self.reload_datasets()
+                return
+            logger.warning("Gave up waiting for the target agent after %.0fs — use the Retry button once it is up.", give_up_after)
+        finally:
+            self._target_watcher_running = False
 
     def reload_datasets(self) -> None:
         """Re-fetch real datasets against whatever GITHUB_TARGET_REPO /

@@ -434,8 +434,10 @@ class LiveDataEngine:
 
         # A retry/reload can land while a free-tier target is cold again —
         # wait for it to answer before the first real /chat call instead of
-        # caching a gateway 502 (cheap no-op when it's already awake).
-        self.client.wait_for_target_agent()
+        # caching a gateway 502 (cheap no-op when it's already awake). Short
+        # on purpose: startup already waited once in AppState, and if the
+        # target is still down a second long wait only delays the app coming up.
+        self.client.wait_for_target_agent(max_wait=15.0)
 
         # One real benign call first — gives behaviour telemetry a real
         # normal-baseline row alongside the real attack rows below.

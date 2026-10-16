@@ -388,27 +388,47 @@ class MCPClient:
         resp.raise_for_status()
         return resp.json()
 
-    def wait_for_target_agent(self, max_wait: float = 90.0, interval: float = 5.0) -> Dict[str, Any]:
+    # Statuses a gateway returns while a host is cold-starting or briefly
+    # throttling — worth waiting out. Anything else (401/403/404/...) is a
+    # real problem a retry loop would only delay reporting.
+    _TRANSIENT_STATUSES = frozenset({429, 502, 503, 504})
+
+    def wait_for_target_agent(self, max_wait: float = 45.0, initial_delay: float = 3.0, max_delay: float = 20.0) -> Dict[str, Any]:
         """Polls /healthz until the target agent actually answers, then
         returns its health dict. A host that has spun down (Render's free tier
         after ~15 min idle) refuses connections or returns gateway 502/503/504
         for the first 30-60s+ of a cold start — a single-shot startup fetch
         loses that race and freezes the failure until the next restart.
-        Only transport/HTTP errors are retried; a missing TARGET_AGENT_URL
-        (a config error, not a timing one) still raises immediately. Raises
-        the last error if the agent still isn't up after max_wait."""
+
+        Retries only transport errors and transient gateway statuses (429/502/
+        503/504), with exponential backoff (and the server's Retry-After on a
+        429) rather than a fixed fast poll — hammering a throttled endpoint
+        only prolongs the throttle. A missing TARGET_AGENT_URL or any other
+        HTTP error fails immediately. Raises the last error if the agent
+        still isn't up after max_wait."""
         deadline = time.monotonic() + max_wait
+        delay = initial_delay
         attempt = 0
         while True:
             attempt += 1
             try:
                 return self.target_agent_healthz()
-            except httpx.HTTPError as exc:
-                if time.monotonic() + interval >= deadline:
-                    logger.warning("Target agent still not answering after %.0fs (%d attempts): %s", max_wait, attempt, exc)
+            except httpx.HTTPStatusError as exc:
+                status = exc.response.status_code
+                if status not in self._TRANSIENT_STATUSES:
                     raise
-                logger.info("Target agent not up yet (attempt %d, likely cold-starting): %s — retrying in %.0fs", attempt, exc, interval)
-                time.sleep(interval)
+                retry_after = exc.response.headers.get("retry-after", "")
+                wait = min(float(retry_after), max_delay) if retry_after.replace(".", "", 1).isdigit() else delay
+                err = exc
+            except (httpx.TransportError, httpx.TimeoutException) as exc:
+                wait = delay
+                err = exc
+            if time.monotonic() + wait >= deadline:
+                logger.warning("Target agent still not answering after %.0fs (%d attempts): %s", max_wait, attempt, err)
+                raise err
+            logger.info("Target agent not up yet (attempt %d): %s — retrying in %.0fs", attempt, err, wait)
+            time.sleep(wait)
+            delay = min(delay * 2, max_delay)
 
     def target_agent_set_disabled(self, disabled: bool) -> Dict[str, Any]:
         """Real Respond (disable) / Recover (enable) action against the real deployed target agent."""
